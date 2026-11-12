@@ -1,0 +1,5 @@
+intervai_env/
+__pycache__/
+.DS_Store
+data/*.pdf
+data/*.docx
