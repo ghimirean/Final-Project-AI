@@ -36,6 +36,20 @@ SECTION_KEYWORDS = ["EDUCATION", "EXPERIENCE", "SKILLS", "PROJECTS",
                     "CERTIFICATIONS", "LEADERSHIP", "ACTIVITIES",
                     "SUMMARY", "OBJECTIVE", "AWARDS", "LANGUAGES"]
 
+SMALL_WORDS = {"and", "of", "&", "/", "-"}
+
+def is_heading(line):
+    # A heading is a short line containing a known keyword, written either
+    # in ALL CAPS ("WORK EXPERIENCE") or Title Case ("Work Experience")
+    line = line.rstrip(":").strip()
+    words = line.split()
+    if not words or len(words) > 4:
+        return False
+    if not any(k in line.upper() for k in SECTION_KEYWORDS):
+        return False
+    return line.isupper() or all(w[0].isupper() or w.lower() in SMALL_WORDS
+                                 for w in words)
+
 def split_sections(text):
     sections = {"HEADER": []}
     current = "HEADER"
@@ -43,9 +57,9 @@ def split_sections(text):
         line = line.strip()
         if not line:
             continue
-        # A heading is an ALL-CAPS line containing a known keyword
-        if line.isupper() and any(k in line for k in SECTION_KEYWORDS):
-            current = line
+        if is_heading(line):
+            # Store names in upper case so get_section("EXPERIENCE") always works
+            current = line.rstrip(":").strip().upper()
             sections[current] = []
         else:
             sections[current].append(line)
@@ -105,11 +119,24 @@ def extract_education(lines):
 
 MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
           "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
-MONTH = r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?"
-DATE_RANGE = MONTH + r" (\d{4})\s*[–—-]\s*(?:" + MONTH + r" (\d{4})|Present|Current)"
+# One date can be "Aug 2024", "08/2024", or just "2024"
+DATE = (r"(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4}"
+        r"|\d{1,2}/\d{4}|\d{4})")
+DATE_RANGE = (r"\b(" + DATE + r")\s*(?:[–—-]|to)\s*(" + DATE
+              + r"|Present|Current|Now)\b")
 
-def to_months(month, year):
-    return int(year) * 12 + MONTHS[month[:3].lower()]
+def to_months(token):
+    # Turns a date token into a month count so two dates can be subtracted
+    token = token.strip()
+    if token.lower() in ("present", "current", "now"):
+        return date.today().year * 12 + date.today().month
+    if "/" in token:                                  # "08/2024"
+        month, year = token.split("/")
+        return int(year) * 12 + int(month)
+    parts = token.split()
+    if len(parts) == 2:                               # "Aug 2024"
+        return int(parts[1]) * 12 + MONTHS[parts[0][:3].lower()]
+    return int(token) * 12 + 1                        # "2024" -> treat as January
 
 def extract_experience(lines):
     jobs = []
@@ -117,11 +144,8 @@ def extract_experience(lines):
         m = re.search(DATE_RANGE, line, re.IGNORECASE)
         if not m:
             continue
-        start = to_months(m.group(1), m.group(2))
-        if m.group(3):                      # has an end date
-            end = to_months(m.group(3), m.group(4))
-        else:                               # "Present"
-            end = date.today().year * 12 + date.today().month
+        start = to_months(m.group(1))
+        end = to_months(m.group(2))
         # The line above the date line is usually "Company | Title"
         header = lines[i - 1] if i > 0 else ""
         if "|" in header:
