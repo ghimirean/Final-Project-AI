@@ -145,3 +145,79 @@ def score_match(profile, job, skill_list=None):
             "experience_penalty": round(penalty, 1),
         },
     }
+
+
+# ---------- Ranking + output ----------
+
+def make_reason(breakdown):
+    # One readable line explaining the score, e.g.
+    # "Matches 5/7 skills; missing GitHub, Linux; needs 5+ yrs (you have 2.6)."
+    matched = breakdown["matched_skills"]
+    missing = breakdown["missing_skills"]
+    total = len(matched) + len(missing)
+    if total == 0:
+        parts = ["No known skills found in the posting"]
+    else:
+        parts = [f"Matches {len(matched)}/{total} skills"]
+    if missing:
+        shown = ", ".join(missing[:3])
+        parts.append("missing " + shown + (" and more" if len(missing) > 3 else ""))
+    if breakdown["experience_penalty"] > 0:
+        parts.append(f"needs {breakdown['required_years']}+ yrs "
+                     f"(you have {breakdown['candidate_years']})")
+    return "; ".join(parts) + "."
+
+
+def rank_jobs(profile, jobs):
+    """Scores every job for this profile and returns them best-first.
+    Each result keeps the job's fields and adds score, matched_skills,
+    missing_skills, reason, and the full breakdown.
+    """
+    skill_list = load_skills(SKILLS_PATH)      # load once, not once per job
+    ranked = []
+    for job in jobs:
+        result = score_match(profile, job, skill_list)
+        b = result["breakdown"]
+        ranked.append({
+            "id": job["id"],
+            "title": job["title"],
+            "company": job["company"],
+            "location": job["location"],
+            "url": job["url"],
+            "score": result["score"],
+            "matched_skills": b["matched_skills"],
+            "missing_skills": b["missing_skills"],
+            "reason": make_reason(b),
+            "breakdown": b,
+        })
+    ranked.sort(key=lambda r: r["score"], reverse=True)
+    return ranked
+
+
+def print_table(ranked):
+    print(f"{'#':<3}{'Score':>6}  {'Title':<30}{'Company':<28}Reason")
+    print("-" * 110)
+    for i, r in enumerate(ranked, 1):
+        print(f"{i:<3}{r['score']:>6.1f}  {r['title'][:29]:<30}"
+              f"{r['company'][:27]:<28}{r['reason']}")
+
+
+def save_json(data, out_path):
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+if __name__ == "__main__":
+    import sys
+    from resume_parser import parse_resume
+
+    resume_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "data", "sample.pdf")
+    jobs_path = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, "tests", "fixtures", "jobs.json")
+    out_path = os.path.join(ROOT, "output", "ranked_jobs.json")
+
+    profile = parse_resume(resume_path, skills_path=SKILLS_PATH)
+    ranked = rank_jobs(profile, load_jobs(jobs_path))
+    print_table(ranked)
+    save_json(ranked, out_path)
+    print(f"\nSaved {len(ranked)} ranked jobs to output/ranked_jobs.json")

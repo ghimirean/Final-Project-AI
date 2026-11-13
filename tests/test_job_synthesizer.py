@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(ROOT, "agents"))
 
 from job_synthesizer import (  # noqa: E402
     load_jobs, extract_requirements, extract_min_years, extract_degree,
-    score_match, text_similarity,
+    score_match, text_similarity, rank_jobs, make_reason,
 )
 
 JOBS = {job["id"]: job for job in load_jobs(os.path.join(ROOT, "tests", "fixtures", "jobs.json"))}
@@ -101,3 +101,38 @@ def test_more_experience_removes_penalty():
 def test_text_similarity_range():
     assert text_similarity("java developer", "java developer") > 0.99
     assert text_similarity("java developer", "pastry chef") == 0
+
+
+# ---------- Step C: ranking + output ----------
+
+def test_rank_jobs_sorted_best_first():
+    ranked = rank_jobs(STUDENT, list(JOBS.values()))
+    scores = [r["score"] for r in ranked]
+    assert scores == sorted(scores, reverse=True)
+    assert len(ranked) == len(JOBS)
+
+
+def test_rank_jobs_result_fields():
+    for r in rank_jobs(STUDENT, list(JOBS.values())):
+        for key in ["id", "title", "company", "score", "matched_skills", "missing_skills", "reason"]:
+            assert key in r
+        assert isinstance(r["reason"], str) and r["reason"]
+
+
+def test_java_student_ranking_order():
+    ids = [r["id"] for r in rank_jobs(STUDENT, list(JOBS.values()))]
+    assert ids[0] == "job-001"                         # Junior Java Developer first
+    assert ids.index("job-005") > ids.index("job-001")  # senior role ranks lower
+
+
+def test_reason_mentions_missing_skills_and_years():
+    senior = next(r for r in rank_jobs(STUDENT, list(JOBS.values())) if r["id"] == "job-005")
+    assert "needs 5+ yrs" in senior["reason"]
+    assert "missing" in senior["reason"]
+
+
+def test_reason_with_no_skills_in_posting():
+    reason = make_reason({"matched_skills": [], "missing_skills": [],
+                          "experience_penalty": 0, "required_years": 0,
+                          "candidate_years": 1.0})
+    assert reason == "No known skills found in the posting."
