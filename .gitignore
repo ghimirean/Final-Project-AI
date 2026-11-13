@@ -7,3 +7,4 @@ output/
 .env
 CLAUDE.md
 .claude/
+.venv/
