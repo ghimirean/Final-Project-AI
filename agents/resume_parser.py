@@ -1,4 +1,7 @@
+import re
+import json
 import pdfplumber
+
 
 def read_pdf(path):
        text = ""
@@ -26,10 +29,22 @@ def split_sections(text):
             sections[current].append(line)
     return sections
 
+def find(pattern, text):
+    match = re.search(pattern, text)
+    return match.group() if match else None
+
+def extract_contact(header_lines):
+    header = " ".join(header_lines)
+    return {
+        "name": header_lines[0] if header_lines else None,
+        "email": find(r"[\w.+-]+@[\w-]+\.[\w.-]+", header),
+        "phone": find(r"\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}", header),
+        "linkedin": find(r"linkedin\.com/in/[\w-]+", header),
+        "github": find(r"github\.com/[\w-]+", header),
+    }
+
 if __name__ == "__main__":
     text = read_pdf("data/sample.pdf")
     sections = split_sections(text)
-    for name, lines in sections.items():
-        print(f"===== {name} ({len(lines)} lines) =====")
-        for l in lines:
-            print("   ", l)
+    contact = extract_contact(sections["HEADER"])
+    print(json.dumps(contact, indent=2))
