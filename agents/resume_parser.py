@@ -1,3 +1,4 @@
+from datetime import date
 import re
 import json
 import pdfplumber
@@ -81,6 +82,36 @@ def extract_education(lines):
         "graduation": graduation,
     }
 
+MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+          "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
+MONTH = r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?"
+DATE_RANGE = MONTH + r" (\d{4})\s*[–—-]\s*(?:" + MONTH + r" (\d{4})|Present|Current)"
+
+def to_months(month, year):
+    return int(year) * 12 + MONTHS[month[:3].lower()]
+
+def extract_experience(lines):
+    jobs = []
+    for i, line in enumerate(lines):
+        m = re.search(DATE_RANGE, line, re.IGNORECASE)
+        if not m:
+            continue
+        start = to_months(m.group(1), m.group(2))
+        if m.group(3):                      # has an end date
+            end = to_months(m.group(3), m.group(4))
+        else:                               # "Present"
+            end = date.today().year * 12 + date.today().month
+        # The line above the date line is usually "Company | Title"
+        header = lines[i - 1] if i > 0 else ""
+        if "|" in header:
+            company, title = [p.strip() for p in header.split("|", 1)]
+        else:
+            company, title = header, None
+        jobs.append({"company": company, "title": title,
+                     "dates": m.group(0), "months": end - start})
+    total_years = round(sum(j["months"] for j in jobs) / 12, 1)
+    return jobs, total_years
+
 
 if __name__ == "__main__":
     text = read_pdf("data/sample.pdf")
@@ -88,4 +119,7 @@ if __name__ == "__main__":
     profile = extract_contact(sections["HEADER"])
     profile["skills"] = extract_skills(text, load_skills())
     profile["education"] = extract_education(get_section(sections, "EDUCATION"))
+    jobs, years = extract_experience(get_section(sections, "EXPERIENCE"))
+    profile["experience"] = jobs
+    profile["experience_years"] = years
     print(json.dumps(profile, indent=2))
