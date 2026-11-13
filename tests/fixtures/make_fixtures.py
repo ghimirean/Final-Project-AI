@@ -37,7 +37,7 @@ RESUMES = {
         "Marcus Oyelaran",
         "marcus.oyelaran@example.org",
         "555-404-9821",
-        "github.com/marcus-oyelaran-fake",
+        "GitHub: github.com/marcus-oyelaran-fake",
         "EXPERIENCE",
         "Lakeside Robotics | Software Engineer Intern",
         "01/2023 - 05/2024",

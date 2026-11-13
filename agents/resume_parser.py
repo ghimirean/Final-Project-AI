@@ -83,7 +83,19 @@ def load_skills(path="data/skills.txt"):
     with open(path) as f:
         return [line.strip() for line in f if line.strip()]
 
+# Matches links like https://..., www..., linkedin.com/in/x, github.com/x,
+# plus a one-word label right before them ("GitHub: github.com/x").
+# Only common web endings are listed, so "Node.js" is NOT treated as a link.
+URL_PATTERN = (r"(?:\b[A-Za-z]+:\s*)?"
+               r"(?:https?://\S+|www\.\S+"
+               r"|\b[\w.-]+\.(?:com|org|net|io|dev|edu|me|co|ai|app)\b(?:/\S*)?)")
+
+def remove_urls(text):
+    return re.sub(URL_PATTERN, " ", text, flags=re.IGNORECASE)
+
 def extract_skills(text, skill_list):
+    # Drop links first so "github.com/me" doesn't count as the skill "GitHub"
+    text = remove_urls(text)
     found = []
     for skill in skill_list:
         # Match the skill as a whole word, so "Java" doesn't match "JavaScript"
@@ -125,7 +137,7 @@ DATE = (r"(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4
 DATE_RANGE = (r"\b(" + DATE + r")\s*(?:[–—-]|to)\s*(" + DATE
               + r"|Present|Current|Now)\b")
 
-def to_months(token):
+def to_months(token, is_end=False):
     # Turns a date token into a month count so two dates can be subtracted
     token = token.strip()
     if token.lower() in ("present", "current", "now"):
@@ -136,7 +148,8 @@ def to_months(token):
     parts = token.split()
     if len(parts) == 2:                               # "Aug 2024"
         return int(parts[1]) * 12 + MONTHS[parts[0][:3].lower()]
-    return int(token) * 12 + 1                        # "2024" -> treat as January
+    # "2024" alone: a start year means January, an end year means December
+    return int(token) * 12 + (12 if is_end else 1)
 
 def extract_experience(lines):
     jobs = []
@@ -145,7 +158,7 @@ def extract_experience(lines):
         if not m:
             continue
         start = to_months(m.group(1))
-        end = to_months(m.group(2))
+        end = to_months(m.group(2), is_end=True)
         # The line above the date line is usually "Company | Title"
         header = lines[i - 1] if i > 0 else ""
         if "|" in header:
@@ -153,7 +166,8 @@ def extract_experience(lines):
         else:
             company, title = header, None
         jobs.append({"company": company, "title": title,
-                     "dates": m.group(0), "months": end - start})
+                     # +1 counts both the first and last month (Jan-Dec = 12)
+                     "dates": m.group(0), "months": end - start + 1})
     total_years = round(sum(j["months"] for j in jobs) / 12, 1)
     return jobs, total_years
 
