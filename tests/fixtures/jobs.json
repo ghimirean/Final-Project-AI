@@ -1,0 +1,50 @@
+[
+  {
+    "id": "job-001",
+    "title": "Junior Java Developer",
+    "company": "Maplewood Software (fake)",
+    "location": "Monroe, LA",
+    "url": "https://example.com/jobs/job-001",
+    "description": "We are hiring a junior developer to build internal tools in Java. You will write clean code using OOP principles and solid Data Structures and Algorithms knowledge. Some C++ is a plus. We use Git for version control. Requirements: Bachelor's degree in Computer Science or a related field (or currently pursuing one). No professional experience required."
+  },
+  {
+    "id": "job-002",
+    "title": "Software Engineering Intern",
+    "company": "Lakeview Systems (fake)",
+    "location": "Remote",
+    "url": "https://example.com/jobs/job-002",
+    "description": "Summer internship for students studying Computer Science. Work with our team on performance-critical C++ services and Java tooling on Linux. Strong understanding of Algorithms and Data Structures expected. Must be pursuing a Bachelor's degree. Familiarity with Git and GitHub preferred."
+  },
+  {
+    "id": "job-003",
+    "title": "Data Science Intern",
+    "company": "Bluebird Analytics (fake)",
+    "location": "Dallas, TX",
+    "url": "https://example.com/jobs/job-003",
+    "description": "Help our analytics team explore customer data. You will clean datasets with Python and pandas, write SQL queries, and build simple Machine Learning models with scikit-learn. Experience creating dashboards in Tableau is a bonus. Pursuing a Bachelor's degree in Statistics, Data Science, or Computer Science."
+  },
+  {
+    "id": "job-004",
+    "title": "Machine Learning Engineer",
+    "company": "Northstar AI Labs (fake)",
+    "location": "Austin, TX",
+    "url": "https://example.com/jobs/job-004",
+    "description": "Design and train Deep Learning models for NLP and Computer Vision products. Daily work in Python with PyTorch and TensorFlow, deploying models with Docker on AWS. Requires 2+ years of experience in machine learning engineering and a Master's degree in Computer Science or a related field."
+  },
+  {
+    "id": "job-005",
+    "title": "Senior Backend Engineer",
+    "company": "Ironclad Payments (fake)",
+    "location": "New York, NY",
+    "url": "https://example.com/jobs/job-005",
+    "description": "Lead the design of high-traffic payment services. Our backend is written in Java with a REST API layer, PostgreSQL via SQL, and Docker containers running on AWS. You will mentor junior engineers and own system architecture. Requires 5+ years of professional backend experience and a Bachelor's degree in Computer Science."
+  },
+  {
+    "id": "job-006",
+    "title": "Frontend Web Developer",
+    "company": "Pixelpine Studio (fake)",
+    "location": "Remote",
+    "url": "https://example.com/jobs/job-006",
+    "description": "Build responsive websites for small business clients using HTML, CSS, JavaScript, TypeScript and React. You will work closely with designers and use Git for every project. At least 1 year of experience building websites is required."
+  }
+]
