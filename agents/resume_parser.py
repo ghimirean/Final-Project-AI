@@ -3,6 +3,7 @@ import re
 import json
 import os
 import pdfplumber
+import docx
 
 
 def read_pdf(path):
@@ -11,6 +12,25 @@ def read_pdf(path):
            for page in pdf.pages:
                text += (page.extract_text() or "") + "\n"
        return text
+
+def read_docx(path):
+    document = docx.Document(path)
+    lines = [p.text for p in document.paragraphs]
+    # Some resume templates put content inside tables, so read those cells too
+    for table in document.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                lines.append(cell.text)
+    return "\n".join(lines)
+
+def read_resume(path):
+    # Picks the right reader based on the file extension
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf":
+        return read_pdf(path)
+    if ext == ".docx":
+        return read_docx(path)
+    raise ValueError(f"Unsupported file type: {ext} (use .pdf or .docx)")
 
 SECTION_KEYWORDS = ["EDUCATION", "EXPERIENCE", "SKILLS", "PROJECTS",
                     "CERTIFICATIONS", "LEADERSHIP", "ACTIVITIES",
@@ -116,7 +136,7 @@ def extract_experience(lines):
 
 def parse_resume(path, skills_path="data/skills.txt"):
     # Runs the full pipeline on one resume and returns the profile dict
-    text = read_pdf(path)
+    text = read_resume(path)
     sections = split_sections(text)
     profile = extract_contact(sections.get("HEADER", []))
     profile["skills"] = extract_skills(text, load_skills(skills_path))
@@ -135,7 +155,9 @@ def save_profile(profile, out_path="output/profile.json"):
 
 
 if __name__ == "__main__":
-    profile = parse_resume("data/sample.pdf")
+    import sys
+    path = sys.argv[1] if len(sys.argv) > 1 else "data/sample.pdf"
+    profile = parse_resume(path)
     save_profile(profile)
     print(json.dumps(profile, indent=2, ensure_ascii=False))
     print("Saved to output/profile.json")
