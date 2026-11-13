@@ -58,9 +58,34 @@ def extract_skills(text, skill_list):
             found.append(skill)
     return found
 
+
+def get_section(sections, keyword):
+    # Finds a section by keyword, e.g. "EDUCATION" matches "EDUCATION & TRAINING"
+    for name, lines in sections.items():
+        if keyword in name:
+            return lines
+    return []
+
+def extract_education(lines):
+    text = "\n".join(lines)
+    institution = next((l for l in lines
+                        if re.search(r"University|College|Institute|School", l)), None)
+    degree = next((l for l in lines
+                   if re.search(r"\b(Bachelor|Master|Associate|Doctor|Ph\.?D|B\.S|M\.S|B\.A|M\.A|MBA)\b", l)), None)
+    field = degree.split(" in ", 1)[1].strip() if degree and " in " in degree else None
+    graduation = find(r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.? \d{4}", text)
+    return {
+        "institution": institution,
+        "degree": degree,
+        "field": field,
+        "graduation": graduation,
+    }
+
+
 if __name__ == "__main__":
     text = read_pdf("data/sample.pdf")
     sections = split_sections(text)
     profile = extract_contact(sections["HEADER"])
     profile["skills"] = extract_skills(text, load_skills())
+    profile["education"] = extract_education(get_section(sections, "EDUCATION"))
     print(json.dumps(profile, indent=2))
