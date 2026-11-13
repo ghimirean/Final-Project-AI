@@ -43,8 +43,24 @@ def extract_contact(header_lines):
         "github": find(r"github\.com/[\w-]+", header),
     }
 
+def load_skills(path="data/skills.txt"):
+    with open(path) as f:
+        return [line.strip() for line in f if line.strip()]
+
+def extract_skills(text, skill_list):
+    found = []
+    for skill in skill_list:
+        # Match the skill as a whole word, so "Java" doesn't match "JavaScript"
+        pattern = r"(?<![\w+#])" + re.escape(skill) + r"(?![\w+#])"
+        # Short skills like "C" or "R" must match exact case
+        flags = 0 if len(skill) <= 2 else re.IGNORECASE
+        if re.search(pattern, text, flags):
+            found.append(skill)
+    return found
+
 if __name__ == "__main__":
     text = read_pdf("data/sample.pdf")
     sections = split_sections(text)
-    contact = extract_contact(sections["HEADER"])
-    print(json.dumps(contact, indent=2))
+    profile = extract_contact(sections["HEADER"])
+    profile["skills"] = extract_skills(text, load_skills())
+    print(json.dumps(profile, indent=2))

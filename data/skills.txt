@@ -1,0 +1,39 @@
+Python
+Java
+JavaScript
+TypeScript
+C
+C++
+C#
+SQL
+R
+HTML
+CSS
+React
+Node.js
+Django
+Flask
+Git
+GitHub
+Docker
+AWS
+Linux
+Excel
+PowerPoint
+Tableau
+Power BI
+Machine Learning
+Deep Learning
+Data Analysis
+Data Structures
+Algorithms
+OOP
+Object-Oriented Programming
+REST API
+pandas
+NumPy
+scikit-learn
+TensorFlow
+PyTorch
+NLP
+Computer Vision
