@@ -1,6 +1,7 @@
 from datetime import date
 import re
 import json
+import os
 import pdfplumber
 
 
@@ -113,13 +114,28 @@ def extract_experience(lines):
     return jobs, total_years
 
 
-if __name__ == "__main__":
-    text = read_pdf("data/sample.pdf")
+def parse_resume(path, skills_path="data/skills.txt"):
+    # Runs the full pipeline on one resume and returns the profile dict
+    text = read_pdf(path)
     sections = split_sections(text)
-    profile = extract_contact(sections["HEADER"])
-    profile["skills"] = extract_skills(text, load_skills())
+    profile = extract_contact(sections.get("HEADER", []))
+    profile["skills"] = extract_skills(text, load_skills(skills_path))
     profile["education"] = extract_education(get_section(sections, "EDUCATION"))
     jobs, years = extract_experience(get_section(sections, "EXPERIENCE"))
     profile["experience"] = jobs
     profile["experience_years"] = years
-    print(json.dumps(profile, indent=2))
+    return profile
+
+def save_profile(profile, out_path="output/profile.json"):
+    # Creates the output folder if needed; ensure_ascii=False keeps
+    # characters like "é" readable instead of "é"
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(profile, f, indent=2, ensure_ascii=False)
+
+
+if __name__ == "__main__":
+    profile = parse_resume("data/sample.pdf")
+    save_profile(profile)
+    print(json.dumps(profile, indent=2, ensure_ascii=False))
+    print("Saved to output/profile.json")
