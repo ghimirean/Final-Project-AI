@@ -182,6 +182,8 @@ def parse_resume(path, skills_path="data/skills.txt"):
     jobs, years = extract_experience(get_section(sections, "EXPERIENCE"))
     profile["experience"] = jobs
     profile["experience_years"] = years
+    # Full text is kept so Agent 3 can compare the whole resume to job posts
+    profile["raw_text"] = text
     return profile
 
 def save_profile(profile, out_path="output/profile.json"):
@@ -197,5 +199,7 @@ if __name__ == "__main__":
     path = sys.argv[1] if len(sys.argv) > 1 else "data/sample.pdf"
     profile = parse_resume(path)
     save_profile(profile)
-    print(json.dumps(profile, indent=2, ensure_ascii=False))
+    # raw_text is saved to the file but left out of the printout to keep it readable
+    printable = {k: v for k, v in profile.items() if k != "raw_text"}
+    print(json.dumps(printable, indent=2, ensure_ascii=False))
     print("Saved to output/profile.json")

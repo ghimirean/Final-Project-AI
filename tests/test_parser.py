@@ -54,6 +54,13 @@ def test_fake_resume(filename, name, email, skills, years):
     assert profile["experience_years"] == years
 
 
+def test_profile_keeps_raw_text():
+    for filename, name, *_ in CASES:
+        profile = parse(filename)
+        assert name in profile["raw_text"]
+        assert "experience" in profile["raw_text"].lower()
+
+
 def test_each_resume_finds_two_jobs():
     for filename, *_ in CASES:
         assert len(parse(filename)["experience"]) == 2

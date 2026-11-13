@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(ROOT, "agents"))
 
 from job_synthesizer import (  # noqa: E402
     load_jobs, extract_requirements, extract_min_years, extract_degree,
-    score_match, text_similarity, rank_jobs, make_reason,
+    score_match, job_similarities, rank_jobs, make_reason, resume_text,
 )
 
 JOBS = {job["id"]: job for job in load_jobs(os.path.join(ROOT, "tests", "fixtures", "jobs.json"))}
@@ -98,9 +98,29 @@ def test_more_experience_removes_penalty():
     assert score_match(veteran, JOBS["job-005"])["score"] > score_match(STUDENT, JOBS["job-005"])["score"]
 
 
-def test_text_similarity_range():
-    assert text_similarity("java developer", "java developer") > 0.99
-    assert text_similarity("java developer", "pastry chef") == 0
+def test_job_similarities_rescaled_to_best():
+    raw, scaled = job_similarities("java developer",
+                                   ["java developer wanted", "pastry chef", "senior java lead"])
+    assert max(scaled) == 1.0                      # best job gets the full share
+    assert scaled[0] == 1.0 and scaled[1] == 0.0   # chef shares no words
+    assert raw[0] > raw[2] > raw[1]
+
+
+def test_degree_penalty_when_job_needs_higher_degree():
+    b = score_match(STUDENT, JOBS["job-004"])["breakdown"]     # asks for a Master's
+    assert (b["candidate_degree"], b["required_degree"]) == ("Bachelor", "Master")
+    assert b["degree_penalty"] == 5
+    assert score_match(STUDENT, JOBS["job-001"])["breakdown"]["degree_penalty"] == 0
+
+
+def test_no_degree_penalty_when_candidate_has_higher_degree():
+    masters = dict(STUDENT, education={"degree": "Master of Science in Computer Science"})
+    assert score_match(masters, JOBS["job-004"])["breakdown"]["degree_penalty"] == 0
+
+
+def test_resume_text_prefers_raw_text():
+    assert resume_text(dict(STUDENT, raw_text="full resume text")) == "full resume text"
+    assert "Java" in resume_text(STUDENT)          # falls back to the short summary
 
 
 # ---------- Step C: ranking + output ----------
@@ -136,3 +156,17 @@ def test_reason_with_no_skills_in_posting():
                           "experience_penalty": 0, "required_years": 0,
                           "candidate_years": 1.0})
     assert reason == "No known skills found in the posting."
+
+
+def test_best_text_match_gets_full_text_points():
+    ranked = rank_jobs(STUDENT, list(JOBS.values()))
+    assert max(r["breakdown"]["text_points"] for r in ranked) == 40.0
+
+
+def test_ranking_uses_raw_text_when_present():
+    # The same student, but the full resume text talks about Python and ML,
+    # so the text part should now favor the data science job
+    ml_text = dict(STUDENT, raw_text="Python pandas SQL Tableau machine learning "
+                                     "scikit-learn data analysis dashboards customer data")
+    ranked = {r["id"]: r for r in rank_jobs(ml_text, list(JOBS.values()))}
+    assert ranked["job-003"]["breakdown"]["text_points"] == 40.0
