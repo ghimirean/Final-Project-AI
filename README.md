@@ -215,7 +215,9 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
   and only the first degree/institution is read.
 - **Job requirement parsing is regex-based**: `min_years` takes the largest
   "N years" in the text, even if it isn't about experience (e.g. "founded
-  10 years ago"), and "MS" (as in "MS Excel") can be read as a Master's degree.
+  10 years ago"). "MS"/"M.S." only counts as a Master's in a degree context
+  ("MS in …", "M.S. degree", "Degree: MS", "BS/MS"), so "MS Excel" is ignored,
+  but an unusual phrasing like "MS required" is missed.
 - **TF-IDF is bag-of-words.** It matches shared words, not meaning
   ("developer" vs. "engineer" don't match), and its scores are relative
   to the job list (see above).

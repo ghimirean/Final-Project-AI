@@ -42,7 +42,15 @@ YEARS_PATTERN = r"(\d+)\s*\+?\s*(?:or more\s+)?years?\b"
 DEGREE_LEVELS = [
     ("Associate", r"\bAssociate'?s?\b"),
     ("Bachelor", r"\bBachelor'?s?\b|\bB\.?S\.?\b|\bB\.?A\.?\b"),
-    ("Master", r"\bMaster'?s?\b|\bM\.?S\.?\b|\bMBA\b"),
+    # "MS" alone is too ambiguous ("MS Excel", "MS Office"), so MS / M.S.
+    # only counts as a degree in a degree context:
+    #   followed by "in" or "degree"   -> "MS in Computer Science", "M.S. degree"
+    #   after "Degree:"                -> "Degree: MS"
+    #   paired with a bachelor's       -> "BS/MS", "B.S. or M.S."
+    ("Master", r"\bMaster'?s?\b|\bMBA\b"
+               r"|\bM\.?S\.?(?=\s+(?:in|degree)\b)"
+               r"|\b[Dd]egree:?\s+M\.?S\b"
+               r"|\b(?:Bachelor'?s?|B\.?S\.?|B\.?A\.?)\s*(?:or|/)\s*M\.?S\b"),
     ("PhD", r"\bPh\.?D\.?\b|\bDoctorate\b"),
 ]
 

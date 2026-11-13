@@ -170,3 +170,24 @@ def test_ranking_uses_raw_text_when_present():
                                      "scikit-learn data analysis dashboards customer data")
     ranked = {r["id"]: r for r in rank_jobs(ml_text, list(JOBS.values()))}
     assert ranked["job-003"]["breakdown"]["text_points"] == 40.0
+
+
+# ---------- "MS" is only a Master's degree in a degree context ----------
+
+def test_ms_excel_is_not_a_masters_degree():
+    assert extract_degree("Proficient in MS Excel and MS Office.") is None
+    assert extract_degree("Bachelor's degree required. Advanced MS Excel skills.") == "Bachelor"
+
+
+def test_ms_in_degree_context_is_a_masters_degree():
+    assert extract_degree("Requires an MS in Computer Science.") == "Master"
+    assert extract_degree("M.S. in Data Science preferred.") == "Master"
+    assert extract_degree("An M.S. degree is required.") == "Master"
+    assert extract_degree("Degree: MS") == "Master"
+    assert extract_degree("Master's degree required") == "Master"
+
+
+def test_bs_ms_pair_counts_lowest_degree():
+    # "BS/MS" means a Bachelor's is enough, and the MS is still recognized
+    assert extract_degree("BS/MS in Computer Science") == "Bachelor"
+    assert extract_degree("B.S. or M.S. in Statistics") == "Bachelor"
