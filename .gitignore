@@ -5,6 +5,3 @@ data/*.pdf
 data/*.docx
 output/
 .env
-CLAUDE.md
-.claude/
-report_notes.md
