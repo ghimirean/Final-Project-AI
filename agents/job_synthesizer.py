@@ -20,11 +20,13 @@ An example list lives in tests/fixtures/jobs.json.
 import json
 import os
 import re
+import sys
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 from resume_parser import load_skills, extract_skills
+from embeddings import resume_job_similarities, EmbeddingError
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKILLS_PATH = os.path.join(ROOT, "data", "skills.txt")
@@ -92,9 +94,9 @@ def extract_requirements(job, skill_list=None):
 #   counts the most.
 # - Text similarity (40 pts): catches overlap the skill list misses
 #   (job titles, field of study, words like "backend" or "data"). It is
-#   noisier than an exact skill match, so it gets less weight. Raw TF-IDF
-#   similarity is small (about 0.1-0.3), so it is rescaled: the job most
-#   similar to the resume gets the full 40, the others get a share of it.
+#   noisier than an exact skill match, so it gets less weight. It comes
+#   from embeddings (see EMBED_LOW / EMBED_HIGH below), or from TF-IDF if
+#   the embedding model is unavailable.
 # - Experience penalty: minus 10 pts per year you are short of the job's
 #   minimum, capped at 30, so a senior role drops down the list without
 #   being thrown out completely.
@@ -105,6 +107,26 @@ TEXT_WEIGHT = 40
 PENALTY_PER_YEAR = 10
 MAX_PENALTY = 30
 DEGREE_PENALTY = 5
+
+# EMBEDDING SIMILARITY -> TEXT POINTS
+# Embedding similarity is an absolute number: it depends only on the resume
+# and the one job, not on the other jobs in the list. So it is mapped to
+# points directly, on a straight line between two anchors:
+#     similarity <= 0.25  ->  0 points   (no closer than an unrelated job)
+#     similarity >= 0.55  -> 40 points   (as close as a clearly matching job)
+#     in between          -> proportional, e.g. 0.40 -> 20 points
+# The anchors were measured, not guessed (scripts/calibrate_embeddings.py):
+# with this model, our 4 resumes scored 0.01-0.28 against unrelated
+# postings (pastry chef, nurse, truck driver) and about 0.50-0.63 against
+# the postings that clearly fit them. They are specific to this model and
+# this small sample, so re-run the script if the model changes.
+EMBED_LOW = 0.25
+EMBED_HIGH = 0.55
+
+
+def similarity_to_points(similarity):
+    share = (similarity - EMBED_LOW) / (EMBED_HIGH - EMBED_LOW)
+    return TEXT_WEIGHT * max(0.0, min(1.0, share))
 
 DEGREE_ORDER = [level for level, _ in DEGREE_LEVELS]   # Associate < ... < PhD
 
@@ -146,14 +168,34 @@ def job_similarities(text, descriptions):
     return raw, scaled
 
 
-def score_match(profile, job, skill_list=None, similarity=None):
+def text_scores(profile, jobs):
+    """The text-similarity part of the score for each job, as a list of
+    {"similarity", "points", "method"}.
+
+    Normal path ("embeddings"): each job's points depend only on that job.
+    Fallback ("tfidf"): used if the embedding model can't be loaded. TF-IDF
+    points are relative: the most similar job in THIS list gets the full 40.
+    """
+    text = resume_text(profile)
+    descriptions = [job["description"] for job in jobs]
+    try:
+        similarities = resume_job_similarities(text, descriptions)
+        return [{"similarity": s, "points": similarity_to_points(s), "method": "embeddings"}
+                for s in similarities]
+    except EmbeddingError as e:
+        print(f"[Agent 3] Embeddings unavailable ({e}); using TF-IDF.", file=sys.stderr)
+        raw, scaled = job_similarities(text, descriptions)
+        return [{"similarity": r, "points": TEXT_WEIGHT * s, "method": "tfidf"}
+                for r, s in zip(raw, scaled)]
+
+
+def score_match(profile, job, skill_list=None, text_score=None):
     """Scores how well a resume profile fits one job, from 0 to 100.
     Returns {"score": float, "breakdown": {...}} so the score can be explained.
 
-    similarity: optional (raw, scaled) pair from job_similarities(). rank_jobs
-    passes it in so jobs are compared against each other. When scoring a
-    single job on its own, it is computed here, and that job counts as the
-    best match (scaled = 1.0) if it shares any words with the resume.
+    text_score: optional entry from text_scores(). rank_jobs passes it in so
+    all jobs are embedded in one go. Left out, it is computed here for this
+    one job (with embeddings that gives the same points as inside a ranking).
     """
     req = extract_requirements(job, skill_list)
     have = set(profile.get("skills", []))
@@ -161,10 +203,8 @@ def score_match(profile, job, skill_list=None, similarity=None):
     missing = [s for s in req["skills"] if s not in have]
 
     skill_ratio = len(matched) / len(req["skills"]) if req["skills"] else 0.0
-    if similarity is None:
-        raw, scaled = job_similarities(resume_text(profile), [job["description"]])
-        similarity = (raw[0], scaled[0])
-    raw_similarity, scaled_similarity = similarity
+    if text_score is None:
+        text_score = text_scores(profile, [job])[0]
 
     years = profile.get("experience_years", 0)
     years_short = max(0, req["min_years"] - years)
@@ -175,7 +215,7 @@ def score_match(profile, job, skill_list=None, similarity=None):
     degree_penalty = DEGREE_PENALTY if degree_short else 0
 
     skill_points = SKILL_WEIGHT * skill_ratio
-    text_points = TEXT_WEIGHT * scaled_similarity
+    text_points = text_score["points"]
     score = max(0.0, min(100.0, skill_points + text_points - penalty - degree_penalty))
 
     return {
@@ -184,8 +224,9 @@ def score_match(profile, job, skill_list=None, similarity=None):
             "matched_skills": matched,
             "missing_skills": missing,
             "skill_points": round(skill_points, 1),
-            "text_similarity": round(raw_similarity, 3),
+            "text_similarity": round(text_score["similarity"], 3),
             "text_points": round(text_points, 1),
+            "text_method": text_score["method"],
             "required_years": req["min_years"],
             "candidate_years": years,
             "experience_penalty": round(penalty, 1),
@@ -225,10 +266,9 @@ def rank_jobs(profile, jobs):
     missing_skills, reason, and the full breakdown.
     """
     skill_list = load_skills(SKILLS_PATH)      # load once, not once per job
-    raw, scaled = job_similarities(resume_text(profile), [j["description"] for j in jobs])
     ranked = []
-    for job, r, s in zip(jobs, raw, scaled):
-        result = score_match(profile, job, skill_list, similarity=(r, s))
+    for job, text_score in zip(jobs, text_scores(profile, jobs)):
+        result = score_match(profile, job, skill_list, text_score=text_score)
         b = result["breakdown"]
         ranked.append({
             "id": job["id"],

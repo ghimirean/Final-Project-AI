@@ -178,11 +178,12 @@ through for display. `tests/fixtures/jobs.json` has 6 fake examples.
   "id": "job-002",
   "title": "Software Engineering Intern",
   "company": "...", "location": "...", "url": "...",
-  "score": 88.5,
+  "score": 84.0,
   "matched_skills": ["Java", "C++", "Git", "GitHub", "Data Structures", "Algorithms"],
   "missing_skills": ["Linux"],
   "reason": "Matches 6/7 skills; missing Linux.",
-  "breakdown": {"skill_points": 51.4, "text_similarity": 0.125, "text_points": 37.1,
+  "breakdown": {"skill_points": 51.4, "text_similarity": 0.494, "text_points": 32.5,
+                "text_method": "embeddings",
                 "required_years": 0, "candidate_years": 2.6, "experience_penalty": 0,
                 "required_degree": "Bachelor", "candidate_degree": "Bachelor",
                 "degree_penalty": 0}
@@ -196,7 +197,7 @@ Each job gets a score from 0 to 100:
 | Part | Points | How |
 |---|---|---|
 | Skill overlap | up to **60** | 60 × (matched skills ÷ skills the job lists) |
-| Text similarity | up to **40** | TF-IDF cosine similarity, rescaled (see below) |
+| Text similarity | up to **40** | embedding cosine similarity, mapped to points (see below) |
 | Experience gap | **−10 per year** short, max −30 | if your total years < the job's minimum |
 | Degree gap | **−5** | if the job asks for a higher degree than you have |
 
@@ -204,27 +205,38 @@ The final score is kept between 0 and 100.
 
 **Why these weights?** Skills are the most direct signal (recruiters screen
 on "do you have the listed skills"), so they count most. Text similarity
-catches overlap the skill list misses, like job titles, field of study, or words
-like "backend" and "data", but it's noisier, so it counts less. The
-experience penalty pushes senior roles down the list without removing them.
-The degree penalty is small because students often apply while still
-finishing a degree.
+catches overlap the skill list misses, like job titles, field of study, or
+related wording, but it's noisier, so it counts less. The experience penalty
+pushes senior roles down the list without removing them. The degree penalty
+is small because students often apply while still finishing a degree.
 
-**TF-IDF similarity and the "relative" tradeoff.** TF-IDF is fitted on the
-resume's full text **plus all the job descriptions together**, so words that
-appear in every posting ("team", "experience") count less than specific
-ones ("PyTorch", "backend"). Raw cosine similarity between a resume and a
-job posting is small (about 0.03–0.3), so it's rescaled: the most similar
-job gets the full 40 points and every other job gets
-`40 × its similarity ÷ the best similarity`.
+**Text similarity with embeddings** (`agents/embeddings.py`). An embedding
+model turns a text into a vector that captures its meaning, so related
+wording ("developer" / "engineer") lands close together even when the words
+differ. Agent 3 uses a local sentence-transformers model
+(`all-MiniLM-L6-v2`, set in `EMBED_CONFIG`). It runs on your computer, so
+no API key is needed and no resume text is sent anywhere. The model is
+downloaded once (about 90 MB) on first use.
 
-- *Benefit:* scores spread across the full 0–100 range and are easy to read.
-- *Tradeoff:* text points are **relative to the other jobs in the list**.
-  Adding or removing a posting can change a job's score even though the
-  job itself didn't change. Scores should be compared within one ranking,
-  not across different job lists. Calling `score_match(profile, job)` on a
-  single job gives it the full 40 text points if it shares any words with
-  the resume, so use `rank_jobs` for real rankings.
+- The model reads at most 256 tokens (about 180 words), and a resume is
+  longer. So the resume is split into 120-word chunks, each chunk is
+  embedded, and a job's similarity is that of its **best-matching chunk**.
+- Similarity is mapped to points on a straight line between two anchors:
+  **0.25 or less → 0 points, 0.55 or more → 40 points** (0.40 → 20).
+- The anchors were measured with `python scripts/calibrate_embeddings.py`:
+  our 4 resumes scored 0.01–0.28 against unrelated postings (pastry chef,
+  nurse, truck driver) and about 0.50–0.63 against the postings that
+  clearly fit them.
+- **Scores are absolute.** A job's score depends only on the resume and
+  that job. It's the same whether the job is scored alone or in a list of
+  100, and adding or removing other postings doesn't change it.
+
+**TF-IDF fallback.** If the embedding model can't be loaded (library not
+installed, no internet on first use), Agent 3 prints a warning and uses
+TF-IDF word overlap instead. TF-IDF values are small and not comparable
+between runs, so they're rescaled: the most similar job **in that list**
+gets the full 40 points. In this mode scores are relative to the other jobs.
+`breakdown.text_method` says which was used: `"embeddings"` or `"tfidf"`.
 
 ---
 
@@ -270,12 +282,15 @@ python -m pytest -v
 | `tests/test_llm.py` | `ask_llm`: Gemini/Groq requests, JSON + schema validation, missing keys, retries |
 | `tests/test_parser.py` | Agent 1 rule-based parser on 3 fake resumes with different heading, date and skill styles |
 | `tests/test_parser_llm.py` | Agent 1 LLM parser: same format as rules, cleanup, every fallback case, pipeline default |
-| `tests/test_job_synthesizer.py` | Requirement extraction, scoring, penalties, ranking |
+| `tests/test_job_synthesizer.py` | Requirement extraction, scoring, penalties, ranking (on the TF-IDF fallback) |
+| `tests/test_embeddings.py` | Chunking, best-chunk similarity, the 0–40 mapping, scores not depending on other jobs, fallback |
 | `tests/test_pipeline.py` | `run_pipeline` and the `/rank` endpoint (FastAPI `TestClient`) |
 
-**Tests never call a real LLM.** `tests/conftest.py` blocks the network
-function in `agents/llm.py` for every test, and tests that need an LLM
-reply install a fake one. The suite runs offline and without API keys.
+**Tests never call a real LLM or load the real embedding model.**
+`tests/conftest.py` blocks the network function in `agents/llm.py` and the
+model loader in `agents/embeddings.py` for every test. Tests that need a
+reply or an embedding install a fake one. The suite runs offline, without
+API keys, and downloads nothing.
 
 All test data is fake: `tests/fixtures/` holds invented resumes (rebuild
 them with `python tests/fixtures/make_fixtures.py`) and invented job postings.
@@ -324,7 +339,13 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
   10 years ago"). "MS"/"M.S." only counts as a Master's in a degree context
   ("MS in …", "M.S. degree", "Degree: MS", "BS/MS"), so "MS Excel" is ignored,
   but an unusual phrasing like "MS required" is missed.
-- **TF-IDF is bag-of-words.** It matches shared words, not meaning
-  ("developer" vs. "engineer" don't match), and its scores are relative
-  to the job list (see above).
+- **Embedding similarity is noisy.** The anchors (0.25 / 0.55) come from 4
+  resumes and 9 postings and only fit this model. Very short resumes give
+  weak signals (a web developer's resume scored only 0.36 against a
+  frontend job), and longer resumes have more chunks, so slightly more
+  chances of a high best-chunk score.
+- **Embeddings are slow to start and heavy to install**: loading the model
+  takes several seconds per run, and it needs PyTorch.
+- **The TF-IDF fallback is bag-of-words** and its scores are relative to
+  the job list (see above).
 - **The API has no authentication** and is meant for local use and demos.
