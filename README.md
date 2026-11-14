@@ -234,6 +234,16 @@ back validated JSON:
 | `gaps` | what the candidate is missing for this job |
 | `interview_focus` | 1–6 topics **the interview agent should ask about** |
 
+- **Only the top N jobs** (default 5, `LLM_CONFIG["top_n"]`) get LLM key
+  points. Jobs are scored and sorted first, then the best N are sent to
+  Groq. The rest get the rule-based version. This keeps long job lists fast
+  and inside the rate limit.
+- **Accurate candidate facts.** If the graduation date is in the future,
+  the summary says the degree is `expected May 2028, in progress`, and the
+  prompt tells the model it must not claim the degree is completed. The
+  total years are labeled as "all jobs, related or not", and the model is
+  told to count only experience relevant to the posting (a cashier job
+  doesn't count toward "1+ years building websites").
 - **The LLM does not change the score.** The score is computed by code
   before the LLM is called. The schema has no score field, so even if the
   model sends one, it's dropped.
@@ -413,14 +423,15 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
 
 **Agent 3, key points (LLM)**
 - **Groq free-tier rate limit:** `qwen/qwen3.8-27b` allows 1,000 output
-  tokens per minute, about 3 jobs. Larger job lists wait on retries (6 jobs
-  took ~1.5 minutes), and if the wait would exceed the retry budget, the
-  remaining jobs fall back to rule-based key points. Check `assessed_by`.
-- **The LLM can misjudge the candidate.** In our run it said a student
-  still studying "possesses the required Bachelor's degree", and it counted
-  total work years (cashier, test lead) toward "1+ years building websites".
-  Key points are guidance for the interview agent, not facts. The score
-  doesn't depend on them.
+  tokens per minute, about 3 jobs. With the default top 5, a run waits on
+  retries (about 1.3 minutes), and if a wait would exceed the retry budget,
+  that job falls back to rule-based key points. Check `assessed_by`.
+- **The LLM can misjudge the candidate.** Before the fixes above it said a
+  student still studying "possesses the required Bachelor's degree" and
+  counted cashier years toward "1+ years building websites". Both are fixed
+  in our test run, but the model can still misjudge relevance (e.g. whether
+  a "Test Lead" job was technical). Key points are guidance for the
+  interview agent, not facts. The score doesn't depend on them.
 - **Output can vary between runs**, and job postings could contain
   instructions aimed at the model (prompt injection), the same as for Agent 1.
 - **Job text is sent to Groq**, and so is a summary of the candidate

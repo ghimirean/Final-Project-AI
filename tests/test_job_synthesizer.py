@@ -13,7 +13,9 @@ from job_synthesizer import (  # noqa: E402
     load_jobs, extract_requirements, extract_min_years, extract_degree,
     score_match, job_similarities, rank_jobs, make_reason, resume_text,
     assess_job, rule_based_assessment, candidate_summary, LLM_CONFIG,
+    graduation_status,
 )
+from datetime import date  # noqa: E402
 import llm  # noqa: E402
 import pytest  # noqa: E402
 
@@ -310,3 +312,82 @@ def test_assess_job_returns_source(fake_groq):
     result = score_match(STUDENT, JOBS["job-001"])
     assessment, source = assess_job(STUDENT, JOBS["job-001"], result)
     assert source == "llm" and assessment["interview_focus"]
+
+
+
+# ---------- only the top N jobs get LLM key points ----------
+
+def test_only_top_n_jobs_use_llm(fake_groq):
+    calls = fake_groq(GOOD_ASSESSMENT)
+    ranked = rank_jobs(STUDENT, list(JOBS.values()))          # 6 jobs, default top_n
+    top_n = LLM_CONFIG["top_n"]
+    assert top_n == 5
+    assert len(calls) == top_n
+    assert [r["assessed_by"] for r in ranked] == ["llm"] * top_n + ["rules"] * (len(JOBS) - top_n)
+
+
+def test_llm_jobs_are_the_highest_scoring(fake_groq):
+    calls = fake_groq(GOOD_ASSESSMENT)
+    ranked = rank_jobs(STUDENT, list(JOBS.values()), top_n=2)
+    assert len(calls) == 2
+    # The two LLM calls were about the two best-scoring jobs
+    assert ranked[0]["title"] in calls[0]["prompt"] and ranked[1]["title"] in calls[1]["prompt"]
+    assert [r["assessed_by"] for r in ranked[:2]] == ["llm", "llm"]
+    assert {r["assessed_by"] for r in ranked[2:]} == {"rules"}
+    scores = [r["score"] for r in ranked]
+    assert scores == sorted(scores, reverse=True)             # still sorted best-first
+
+
+def test_top_n_from_config(fake_groq, monkeypatch):
+    calls = fake_groq(GOOD_ASSESSMENT)
+    monkeypatch.setitem(LLM_CONFIG, "top_n", 1)
+    rank_jobs(STUDENT, list(JOBS.values()))
+    assert len(calls) == 1
+
+
+def test_top_n_zero_means_no_llm_calls(fake_groq):
+    calls = fake_groq(GOOD_ASSESSMENT)
+    ranked = rank_jobs(STUDENT, list(JOBS.values()), top_n=0)
+    assert calls == [] and {r["assessed_by"] for r in ranked} == {"rules"}
+
+
+# ---------- accurate candidate facts for the LLM ----------
+
+TODAY = date(2026, 11, 14)
+
+
+def test_future_graduation_is_in_progress():
+    assert graduation_status("May 2028", TODAY) == "expected May 2028, in progress"
+    assert graduation_status("05/2027", TODAY) == "expected 05/2027, in progress"
+    assert graduation_status("2027", TODAY) == "expected 2027, in progress"
+
+
+def test_past_graduation_is_graduated():
+    assert graduation_status("May 2022", TODAY) == "graduated May 2022"
+    assert graduation_status("Dec 2024", TODAY) == "graduated Dec 2024"
+
+
+def test_unreadable_or_missing_graduation():
+    assert graduation_status("Spring term", TODAY) == "graduation Spring term"
+    assert graduation_status(None, TODAY) is None
+
+
+def test_summary_says_degree_in_progress():
+    student = dict(STUDENT, education={"degree": "Bachelor of Science in Computer Science",
+                                       "graduation": "May 2028"})
+    summary = candidate_summary(student, today=TODAY)
+    assert "Bachelor of Science in Computer Science (expected May 2028, in progress)" in summary
+    assert "related or not" in summary                       # total years are not all relevant
+
+
+def test_prompt_tells_llm_about_relevant_experience_and_degree(fake_groq):
+    calls = fake_groq(GOOD_ASSESSMENT)
+    student = dict(STUDENT, education={"degree": "Bachelor of Science in Computer Science",
+                                       "graduation": "May 2099"})
+    rank_jobs(student, [JOBS["job-005"]])
+    prompt = calls[0]["prompt"]
+    assert "count only jobs and projects that are relevant" in prompt
+    assert "do NOT count" in prompt
+    assert "does NOT" in prompt and "in progress" in prompt
+    assert "expected May 2099, in progress" in prompt
+    assert "of ANY kind" in prompt
