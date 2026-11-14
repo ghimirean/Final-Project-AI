@@ -51,6 +51,9 @@ def fake_gemini(monkeypatch):
 
     def install(reply_text):
         def fake_post(url, headers, body):
+            if "generativelanguage" not in url:
+                # Only Gemini (Agent 1) is faked here; other agents' LLM calls fail
+                raise llm.LLMError("only Gemini is faked in this test")
             calls.append({"url": url, "prompt": body["contents"][0]["parts"][0]["text"]})
             return {"candidates": [{"content": {"parts": [{"text": reply_text}]}}]}
         monkeypatch.setattr(llm, "_post", fake_post)

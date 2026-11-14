@@ -28,14 +28,15 @@ def validate_jobs(jobs):
 
 def run_pipeline(resume_path, jobs, use_llm=True):
     """Parses a resume (.pdf or .docx) and ranks the given jobs for it.
-    use_llm=True (default): Agent 1 uses the LLM, with rule-based fallback.
-    use_llm=False: rule-based parser only (no API call).
+    use_llm=True (default): Agent 1 (Gemini) parses the resume and Agent 3
+        (Groq) writes key points, each with a rule-based fallback.
+    use_llm=False: rules only, no API calls.
     Returns {"profile": {...}, "ranked_jobs": [...]}.
     """
     validate_jobs(jobs)
     parse = parse_resume_llm if use_llm else parse_resume
     profile = parse(resume_path, skills_path=SKILLS_PATH)
-    ranked = rank_jobs(profile, jobs)      # uses raw_text for TF-IDF
+    ranked = rank_jobs(profile, jobs, use_llm=use_llm)   # uses raw_text for similarity
     # raw_text is only needed for scoring; leave it out of the result
     public_profile = {k: v for k, v in profile.items() if k != "raw_text"}
     return {"profile": public_profile, "ranked_jobs": ranked}

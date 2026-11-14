@@ -2,6 +2,7 @@
 
 Run from project root:  python -m pytest -v
 """
+import json
 import os
 import sys
 
@@ -11,7 +12,10 @@ sys.path.insert(0, os.path.join(ROOT, "agents"))
 from job_synthesizer import (  # noqa: E402
     load_jobs, extract_requirements, extract_min_years, extract_degree,
     score_match, job_similarities, rank_jobs, make_reason, resume_text,
+    assess_job, rule_based_assessment, candidate_summary, LLM_CONFIG,
 )
+import llm  # noqa: E402
+import pytest  # noqa: E402
 
 JOBS = {job["id"]: job for job in load_jobs(os.path.join(ROOT, "tests", "fixtures", "jobs.json"))}
 
@@ -191,3 +195,118 @@ def test_bs_ms_pair_counts_lowest_degree():
     # "BS/MS" means a Bachelor's is enough, and the MS is still recognized
     assert extract_degree("BS/MS in Computer Science") == "Bachelor"
     assert extract_degree("B.S. or M.S. in Statistics") == "Bachelor"
+
+
+
+# ---------- Step 3: LLM key points (Groq is always faked) ----------
+
+GOOD_ASSESSMENT = {
+    "key_points": ["Write internal tools in Java", "Solid OOP and data structures"],
+    "required_skills": ["Java", "OOP"],
+    "nice_to_have": ["C++"],
+    "fit_summary": "Strong fit: the student knows Java, OOP and data structures.",
+    "gaps": [],
+    "interview_focus": ["OOP design", "Data structures", "A Java project"],
+}
+
+PERSON = dict(STUDENT, name="Test Student", email="student@example.com",
+              phone="555-000-1111", linkedin="linkedin.com/in/test-student",
+              projects=[{"name": "Chess Bot", "role": None, "date": None,
+                         "summary": "Wrote a chess engine.", "skills": ["Java"]}])
+
+
+@pytest.fixture
+def fake_groq(monkeypatch):
+    """Makes Groq reply with the given dict/text. Returns the list of calls."""
+    monkeypatch.setenv("GROQ_API_KEY", "test-key-not-real")
+    calls = []
+
+    def install(reply):
+        text = reply if isinstance(reply, str) else json.dumps(reply)
+        def fake_post(url, headers, body):
+            calls.append({"url": url, "model": body["model"],
+                          "prompt": body["messages"][0]["content"]})
+            return {"choices": [{"message": {"content": text}}]}
+        monkeypatch.setattr(llm, "_post", fake_post)
+        return calls
+    return install
+
+
+def test_llm_key_points(fake_groq):
+    fake_groq(GOOD_ASSESSMENT)
+    ranked = rank_jobs(STUDENT, [JOBS["job-001"]])
+    assert ranked[0]["assessed_by"] == "llm"
+    assert ranked[0]["assessment"] == GOOD_ASSESSMENT
+
+
+def test_llm_does_not_change_the_score(fake_groq):
+    # Even if the LLM sends its own "score", it is dropped by the schema
+    fake_groq(dict(GOOD_ASSESSMENT, score=5))
+    with_llm = rank_jobs(STUDENT, list(JOBS.values()))
+    without_llm = rank_jobs(STUDENT, list(JOBS.values()), use_llm=False)
+    assert [(r["id"], r["score"]) for r in with_llm] == [(r["id"], r["score"]) for r in without_llm]
+    assert "score" not in with_llm[0]["assessment"]
+
+
+def test_prompt_contents(fake_groq):
+    calls = fake_groq(GOOD_ASSESSMENT)
+    rank_jobs(PERSON, [JOBS["job-001"]])
+    prompt = calls[0]["prompt"]
+    assert calls[0]["model"] == LLM_CONFIG["model"]
+    assert "api.groq.com" in calls[0]["url"]
+    assert "Junior Java Developer" in prompt and "Maplewood" in prompt
+    assert "Chess Bot" in prompt                              # projects are included
+    assert "score" in prompt and "Do not give your own score" in prompt
+    # Contact details are not sent to the LLM
+    for private in ["Test Student", "student@example.com", "555-000-1111", "linkedin.com"]:
+        assert private not in prompt
+
+
+def test_candidate_summary_has_no_contact_details():
+    summary = candidate_summary(PERSON)
+    assert "Java" in summary and "Chess Bot" in summary
+    assert "Test Student" not in summary and "student@example.com" not in summary
+
+
+@pytest.mark.parametrize("bad_reply", [
+    "Sure! The candidate looks great.",                                  # not JSON
+    {k: v for k, v in GOOD_ASSESSMENT.items() if k != "interview_focus"},  # missing field
+    dict(GOOD_ASSESSMENT, key_points=[]),                                # empty key points
+    dict(GOOD_ASSESSMENT, fit_summary=""),                               # empty summary
+])
+def test_bad_llm_reply_falls_back_to_rules(fake_groq, bad_reply):
+    fake_groq(bad_reply)
+    ranked = rank_jobs(STUDENT, [JOBS["job-001"]])
+    assert ranked[0]["assessed_by"] == "rules"
+    assert ranked[0]["assessment"]["fit_summary"] == ranked[0]["reason"]
+
+
+def test_api_down_falls_back_to_rules():
+    # conftest.py blocks the network: every job gets rule-based key points
+    ranked = rank_jobs(STUDENT, list(JOBS.values()))
+    assert {r["assessed_by"] for r in ranked} == {"rules"}
+
+
+def test_rule_based_assessment_for_senior_role():
+    result = score_match(STUDENT, JOBS["job-005"])
+    req = extract_requirements(JOBS["job-005"])
+    a = rule_based_assessment(JOBS["job-005"], result["breakdown"], req)
+    assert set(a) == set(GOOD_ASSESSMENT)                     # same fields as the LLM version
+    assert "Experience: 5+ years" in a["key_points"]
+    assert any("5+ years" in gap for gap in a["gaps"])
+    assert a["interview_focus"][0] == result["breakdown"]["missing_skills"][0]   # gaps first
+    assert a["fit_summary"] == make_reason(result["breakdown"])
+
+
+def test_use_llm_false_makes_no_calls(fake_groq):
+    calls = fake_groq(GOOD_ASSESSMENT)
+    ranked = rank_jobs(STUDENT, list(JOBS.values()), use_llm=False)
+    assert calls == []
+    assert {r["assessed_by"] for r in ranked} == {"rules"}
+
+
+def test_assess_job_returns_source(fake_groq):
+    fake_groq(GOOD_ASSESSMENT)
+    result = score_match(STUDENT, JOBS["job-001"])
+    assessment, source = assess_job(STUDENT, JOBS["job-001"], result)
+    assert source == "llm" and assessment["interview_focus"]
