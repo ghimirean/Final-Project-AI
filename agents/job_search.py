@@ -50,3 +50,39 @@ def search_jobs(query, provider, limit=20):
         if len(jobs) >= limit:
             break
     return jobs
+
+
+def experience_level(years):
+    """Buckets total years of experience: entry (<2), mid (2-5), senior (5+)."""
+    years = years or 0
+    if years < 2:
+        return "entry"
+    if years < 5:
+        return "mid"
+    return "senior"
+
+
+def build_query(profile, location="", max_keywords=5):
+    """Turns an Agent 1 profile into the query dict that providers receive:
+        {"keywords": [...], "title": str, "location": str, "experience_level": str}
+    Keywords are the first `max_keywords` skills (no case-insensitive repeats).
+    The title is the first experience entry's title, which assumes the most
+    recent job is listed first. Missing profile fields give empty values.
+    """
+    keywords, seen = [], set()
+    for skill in profile.get("skills") or []:
+        key = skill.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        keywords.append(skill)
+        if len(keywords) >= max_keywords:
+            break
+    experience = profile.get("experience") or []
+    title = (experience[0].get("title") or "").strip() if experience else ""
+    return {
+        "keywords": keywords,
+        "title": title,
+        "location": (location or "").strip(),
+        "experience_level": experience_level(profile.get("experience_years")),
+    }

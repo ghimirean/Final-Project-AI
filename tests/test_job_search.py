@@ -13,12 +13,14 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "agents"))
 
 from job_search import (  # noqa: E402
-    JOB_FIELDS, JobProvider, normalize_job, search_jobs,
+    JOB_FIELDS, JobProvider, build_query, experience_level,
+    normalize_job, search_jobs,
 )
 from pipeline import JOB_FIELDS as PIPELINE_JOB_FIELDS  # noqa: E402
-from pipeline import validate_jobs  # noqa: E402
+from pipeline import run_pipeline, validate_jobs  # noqa: E402
 
 FIXTURES = os.path.join(ROOT, "tests", "fixtures")
+RESUME = os.path.join(FIXTURES, "resume_title_case.docx")      # FAKE resume
 with open(os.path.join(FIXTURES, "jobs.json"), encoding="utf-8") as f:
     RAW_JOBS = json.load(f)
 
@@ -83,3 +85,43 @@ def test_duplicate_urls_are_removed():
 
 def test_limit_is_respected():
     assert len(search_jobs({}, FixtureProvider(RAW_JOBS), limit=3)) == 3
+
+
+# ---------- build_query ----------
+
+def test_experience_level_buckets():
+    assert experience_level(None) == "entry"
+    assert experience_level(0) == "entry"
+    assert experience_level(1.9) == "entry"
+    assert experience_level(2) == "mid"
+    assert experience_level(4.9) == "mid"
+    assert experience_level(5) == "senior"
+
+
+def test_query_keywords_are_capped_and_deduped():
+    profile = {"skills": ["Python", "python", "SQL", "Java", "C++", "Git", "Linux"]}
+    query = build_query(profile, max_keywords=4)
+    assert query["keywords"] == ["Python", "SQL", "Java", "C++"]
+
+
+def test_query_from_empty_profile_has_empty_values():
+    assert build_query({}) == {
+        "keywords": [], "title": "", "location": "", "experience_level": "entry",
+    }
+
+
+def test_query_location_is_passed_through_stripped():
+    assert build_query({}, location="  Monroe, LA ")["location"] == "Monroe, LA"
+
+
+def test_query_title_comes_from_first_experience_entry():
+    profile = {"experience": [{"title": "Data Analyst"}, {"title": "Intern"}]}
+    assert build_query(profile)["title"] == "Data Analyst"
+
+
+def test_query_from_real_parsed_profile():
+    profile = run_pipeline(RESUME, RAW_JOBS)["profile"]
+    query = build_query(profile, location="Monroe, LA")
+    assert query["keywords"] and set(query["keywords"]) <= set(profile["skills"])
+    assert query["experience_level"] == experience_level(profile["experience_years"])
+    assert query["location"] == "Monroe, LA"
