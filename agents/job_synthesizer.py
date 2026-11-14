@@ -438,6 +438,22 @@ def print_table(ranked):
               f"{r['company'][:27]:<28}{r['reason']}")
 
 
+def print_key_points(ranked):
+    for i, r in enumerate(ranked, 1):
+        a = r["assessment"]
+        print(f"\n{i}. {r['title']} - {r['company']}   score {r['score']}   "
+              f"(key points by: {r['assessed_by']})")
+        print("   What they want:")
+        for point in a["key_points"]:
+            print(f"     - {point}")
+        if a["nice_to_have"]:
+            print("   Nice to have:   " + ", ".join(a["nice_to_have"]))
+        print("   Fit:            " + a["fit_summary"])
+        if a["gaps"]:
+            print("   Gaps:           " + "; ".join(a["gaps"]))
+        print("   Interview on:   " + "; ".join(a["interview_focus"]))
+
+
 def save_json(data, out_path):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
@@ -445,15 +461,20 @@ def save_json(data, out_path):
 
 
 if __name__ == "__main__":
-    import sys
-    from resume_parser import parse_resume
+    # python agents/job_synthesizer.py [resume] [jobs.json] [--rules]
+    from resume_parser import parse_resume, parse_resume_llm
 
-    resume_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "data", "sample.pdf")
-    jobs_path = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, "tests", "fixtures", "jobs.json")
+    use_llm = "--rules" not in sys.argv
+    args = [a for a in sys.argv[1:] if a != "--rules"]
+    resume_path = args[0] if len(args) > 0 else os.path.join(ROOT, "data", "sample.pdf")
+    jobs_path = args[1] if len(args) > 1 else os.path.join(ROOT, "tests", "fixtures", "jobs.json")
     out_path = os.path.join(ROOT, "output", "ranked_jobs.json")
 
-    profile = parse_resume(resume_path, skills_path=SKILLS_PATH)
-    ranked = rank_jobs(profile, load_jobs(jobs_path))
+    parse = parse_resume_llm if use_llm else parse_resume
+    profile = parse(resume_path, skills_path=SKILLS_PATH)
+    ranked = rank_jobs(profile, load_jobs(jobs_path), use_llm=use_llm)
+    print(f"Resume parsed by: {profile['parsed_by']}\n")
     print_table(ranked)
+    print_key_points(ranked)
     save_json(ranked, out_path)
     print(f"\nSaved {len(ranked)} ranked jobs to output/ranked_jobs.json")

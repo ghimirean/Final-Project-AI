@@ -98,10 +98,11 @@ def test_real_network_is_blocked_in_tests(keys):
 # ---------- retry on "busy" errors (requests.post is faked, no network) ----------
 
 class FakeResponse:
-    def __init__(self, status, payload=None):
+    def __init__(self, status, payload=None, headers=None):
         self.status_code = status
         self.text = "busy" if status != 200 else "ok"
         self._payload = payload or {}
+        self.headers = headers or {}
 
     def json(self):
         return self._payload
@@ -117,17 +118,33 @@ def fake_requests(monkeypatch, statuses):
     return calls
 
 
-def test_retries_once_after_busy_error(monkeypatch):
+def test_retries_after_busy_error(monkeypatch):
     calls = fake_requests(monkeypatch, [503, 200])
     assert REAL_POST("https://x", {}, {}) == {"ok": True}
     assert len(calls) == 2
 
 
-def test_gives_up_after_retry(monkeypatch):
-    calls = fake_requests(monkeypatch, [429, 429])
+def test_gives_up_after_retries(monkeypatch):
+    calls = fake_requests(monkeypatch, [429, 429, 429])
     with pytest.raises(LLMError, match="HTTP 429"):
         REAL_POST("https://x", {}, {})
-    assert len(calls) == 2
+    assert len(calls) == 1 + llm.RETRIES
+
+
+def test_retry_wait_uses_retry_after_header_with_cap():
+    assert llm.retry_wait(FakeResponse(429, headers={"retry-after": "7.5"})) == 7.5
+    assert llm.retry_wait(FakeResponse(429, headers={"retry-after": "600"})) == llm.MAX_RETRY_WAIT_SECONDS
+    assert llm.retry_wait(FakeResponse(429)) == llm.RETRY_WAIT_SECONDS
+    assert llm.retry_wait(FakeResponse(429, headers={"retry-after": "soon"})) == llm.RETRY_WAIT_SECONDS
+
+
+def test_waits_as_long_as_the_api_asks(monkeypatch):
+    waits = []
+    monkeypatch.setattr(llm.time, "sleep", waits.append)
+    statuses = iter([FakeResponse(429, headers={"retry-after": "12"}), FakeResponse(200, {"ok": True})])
+    monkeypatch.setattr(llm.requests, "post", lambda *a, **k: next(statuses))
+    assert REAL_POST("https://x", {}, {}) == {"ok": True}
+    assert waits == [12.0]
 
 
 def test_no_retry_on_client_error(monkeypatch):

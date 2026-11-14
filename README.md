@@ -4,6 +4,17 @@ A multi-agent AI mock interview platform. This README covers **Agent 1
 (Resume Parser)**, **Agent 3 (Job Description Synthesizer + Match Scoring)**
 and the **pipeline / API** that connects them to the HITL dashboard and Agent 4.
 
+| Agent | Model | What the model does | Fallback |
+|---|---|---|---|
+| Agent 1 | Gemini `gemini-3.5-flash` | Reads the resume: contact info, skills, education, jobs, projects | Rule-based parser |
+| Agent 3 | Groq `qwen/qwen3.8-27b` | Key points per job: what the employer wants, fit, gaps, interview topics | Rule-based key points |
+| Agent 3 | local `all-MiniLM-L6-v2` (sentence-transformers) | Embeddings for the text-similarity part of the score | TF-IDF |
+
+**No agent frameworks.** LangChain, LangGraph, CrewAI and similar aren't
+used. All orchestration is our own Python code: `agents/pipeline.py` calls
+Agent 1, then Agent 3, and every LLM call goes through our own small helper
+(`agents/llm.py`) using plain HTTP requests.
+
 ## Setup
 
 ```bash
@@ -23,13 +34,15 @@ Every agent calls an LLM through one shared helper,
   read from `.env` with python-dotenv. Keys are never printed or committed.
 - **Per-agent model:** each agent sets its provider and model in one
   `LLM_CONFIG` dict at the top of its file, so switching models is a
-  one-line change. Agent 1 uses `{"provider": "gemini", "model": "gemini-3.5-flash"}`.
+  one-line change. Agent 1 uses `{"provider": "gemini", "model": "gemini-3.5-flash"}`,
+  Agent 3 uses `{"provider": "groq", "model": "qwen/qwen3.8-27b"}`.
 - **Validated JSON:** pass a pydantic model as `schema` and the reply is
   parsed as JSON and checked against it. Any problem (missing key, network
   error, bad JSON, wrong fields) raises one error type, `LLMError`, so the
   agent can fall back cleanly.
-- **Retries:** "busy" API errors (HTTP 429/5xx) are retried once after a
-  short wait.
+- **Retries:** "busy" API errors (HTTP 429/5xx) are retried up to 2 times.
+  On a rate limit the API says how long to wait (`retry-after` header), and
+  the helper waits that long, up to 30 seconds.
 
 ---
 
@@ -141,14 +154,20 @@ printout and out of the pipeline/API result.
 ## Agent 3 — Job Synthesizer + Match Scoring (`agents/job_synthesizer.py`)
 
 Reads job postings, works out what each one requires, scores how well a
-resume profile fits each job, and ranks them.
+resume profile fits each job, ranks them, and uses an LLM to pull out the
+**key points** of each job: what the employer is actually looking for, how
+the candidate fits, the gaps, and what the interview agent should ask about.
 
 **Run it**
 ```bash
 python agents/job_synthesizer.py                                   # sample.pdf + fake jobs
 python agents/job_synthesizer.py path/to/resume.pdf path/to/jobs.json
+python agents/job_synthesizer.py --rules                           # no LLM calls at all
 ```
-Prints a ranking table and saves it to `output/ranked_jobs.json`.
+Prints a ranking table followed by the key points of every job, and saves
+everything to `output/ranked_jobs.json`. The full run (Gemini parse,
+embeddings, one Groq call per job) took about 1.5 minutes for 6 jobs,
+mostly spent waiting on Groq's free-tier rate limit (see Known limitations).
 
 **Job input format** — a JSON list of postings (all values are strings):
 ```json
@@ -186,9 +205,66 @@ through for display. `tests/fixtures/jobs.json` has 6 fake examples.
                 "text_method": "embeddings",
                 "required_years": 0, "candidate_years": 2.6, "experience_penalty": 0,
                 "required_degree": "Bachelor", "candidate_degree": "Bachelor",
-                "degree_penalty": 0}
+                "degree_penalty": 0},
+  "assessment": {
+    "key_points": ["Ability to work with performance-critical C++ services",
+                   "Strong foundational knowledge of Algorithms and Data Structures", "..."],
+    "required_skills": ["C++", "Java", "Linux", "Algorithms", "Data Structures"],
+    "nice_to_have": ["Git", "GitHub"],
+    "fit_summary": "The candidate is a strong fit due to their relevant CS degree, ...",
+    "gaps": ["Linux"],
+    "interview_focus": ["Probing the candidate's experience with Linux environments, ...", "..."]
+  },
+  "assessed_by": "llm"
 }
 ```
+
+### Key points (LLM, `assess_job`)
+
+For each job, Agent 3 sends Groq (`qwen/qwen3.8-27b`) the job posting, a
+short candidate summary, and the score our code already computed. It gets
+back validated JSON:
+
+| Field | Meaning |
+|---|---|
+| `key_points` | 1–8 points on what the employer is actually looking for |
+| `required_skills` | what the posting says is required |
+| `nice_to_have` | what the posting calls a plus / preferred |
+| `fit_summary` | 1–2 sentences on how well the candidate fits |
+| `gaps` | what the candidate is missing for this job |
+| `interview_focus` | 1–6 topics **the interview agent should ask about** |
+
+- **The LLM does not change the score.** The score is computed by code
+  before the LLM is called. The schema has no score field, so even if the
+  model sends one, it's dropped.
+- **Privacy:** the candidate summary includes skills, education, job titles
+  and projects, but not the name, email, phone or links.
+- **Fallback:** if Groq fails (missing key, rate limit after retries, bad
+  JSON, missing fields), the same six fields are filled from the rule-based
+  requirements: key points list the required skills, years and degree,
+  `fit_summary` is the one-line `reason`, `gaps` are the missing skills
+  plus any experience/degree gap, and `interview_focus` lists the missing
+  skills first, then the matched ones. `assessed_by` says which was used:
+  `"llm"` or `"rules"`.
+- **Why Qwen:** we compared the Groq models available in Nov 2026
+  (`gpt-oss-120b`, `gpt-oss-20b`, `qwen3.8-27b`) on the same jobs. Qwen
+  stayed closest to the postings (the others invented "nice to have"
+  skills or misread the candidate's degree status), used the candidate's
+  projects in its interview topics, and was the fastest (~1 s per job).
+
+### Example run: `data/sample.pdf` + `tests/fixtures/jobs.json`
+
+Resume parsed by Gemini, text similarity from embeddings, key points by
+Qwen for all 6 jobs:
+
+| # | Score | Job | Key points (what they want) | Gaps | Interview focus (first topics) |
+|---|---|---|---|---|---|
+| 1 | 100.0 | Junior Java Developer | Clean OOP code, data structures & algorithms, Java, Git, CS background | none | Car Rental System's OOP design; data-structure depth; Git workflow |
+| 2 | 84.0 | Software Engineering Intern | Performance-critical C++, algorithms, Linux, Java tooling, current CS student | Linux | Linux experience; C++ performance practices; algorithm problem-solving |
+| 3 | 39.1 | Frontend Web Developer | Responsive sites for small businesses, React + TypeScript, working with designers, Git | JavaScript, TypeScript, React | Any JS/React work; Java/OOP → TypeScript; responsive design |
+| 4 | 11.3 | Data Science Intern | Python + pandas, SQL, basic ML with scikit-learn, stats/CS background | Python, SQL, Tableau, ML, pandas, scikit-learn | Motivation to switch to data science; any Python/SQL self-study |
+| 5 | 9.3 | Senior Backend Engineer | Lead high-traffic payment systems, mentoring, Java/SQL/Docker/AWS, 5+ years | 5+ years, SQL, Docker, AWS, REST API, mentoring | Real backend experience; payment-system design; SQL/Docker exposure |
+| 6 | 6.9 | Machine Learning Engineer | Deep learning for NLP/vision, Python, PyTorch/TensorFlow, Docker on AWS, Master's | Python, PyTorch/TensorFlow, Docker/AWS, ML background, Master's | Motivation for ML; steps taken to learn Python/PyTorch; the Master's requirement |
 
 ### How scoring works
 
@@ -252,7 +328,9 @@ result["ranked_jobs"]   # Agent 3 output, best match first
 run_pipeline("data/sample.pdf", jobs, use_llm=False)   # rules only, no API call
 ```
 It checks the job list first and raises `ValueError` if a job is missing fields.
-By default Agent 1 uses the LLM (with fallback), and the API does the same.
+By default (`use_llm=True`) Agent 1 parses with Gemini and Agent 3 writes key
+points with Groq, each with its own fallback. `use_llm=False` makes no API
+calls at all. The API always uses the default.
 
 **Web API** (`api.py`, FastAPI):
 ```bash
@@ -279,10 +357,10 @@ python -m pytest -v
 
 | File | Covers |
 |---|---|
-| `tests/test_llm.py` | `ask_llm`: Gemini/Groq requests, JSON + schema validation, missing keys, retries |
+| `tests/test_llm.py` | `ask_llm`: Gemini/Groq requests, JSON + schema validation, missing keys, retries and `retry-after` |
 | `tests/test_parser.py` | Agent 1 rule-based parser on 3 fake resumes with different heading, date and skill styles |
 | `tests/test_parser_llm.py` | Agent 1 LLM parser: same format as rules, cleanup, every fallback case, pipeline default |
-| `tests/test_job_synthesizer.py` | Requirement extraction, scoring, penalties, ranking (on the TF-IDF fallback) |
+| `tests/test_job_synthesizer.py` | Requirement extraction, scoring, penalties, ranking (on the TF-IDF fallback), LLM key points with a fake Groq: score unchanged, no contact details in the prompt, every fallback case |
 | `tests/test_embeddings.py` | Chunking, best-chunk similarity, the 0–40 mapping, scores not depending on other jobs, fallback |
 | `tests/test_pipeline.py` | `run_pipeline` and the `/rank` endpoint (FastAPI `TestClient`) |
 
@@ -333,7 +411,22 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
 - Overlapping jobs are added together, and year-only dates are approximated
   (start = January, end = December).
 
-**Agent 3**
+**Agent 3, key points (LLM)**
+- **Groq free-tier rate limit:** `qwen/qwen3.8-27b` allows 1,000 output
+  tokens per minute, about 3 jobs. Larger job lists wait on retries (6 jobs
+  took ~1.5 minutes), and if the wait would exceed the retry budget, the
+  remaining jobs fall back to rule-based key points. Check `assessed_by`.
+- **The LLM can misjudge the candidate.** In our run it said a student
+  still studying "possesses the required Bachelor's degree", and it counted
+  total work years (cashier, test lead) toward "1+ years building websites".
+  Key points are guidance for the interview agent, not facts. The score
+  doesn't depend on them.
+- **Output can vary between runs**, and job postings could contain
+  instructions aimed at the model (prompt injection), the same as for Agent 1.
+- **Job text is sent to Groq**, and so is a summary of the candidate
+  without contact details.
+
+**Agent 3, scoring**
 - **Job requirement parsing is regex-based**: `min_years` takes the largest
   "N years" in the text, even if it isn't about experience (e.g. "founded
   10 years ago"). "MS"/"M.S." only counts as a Master's in a degree context

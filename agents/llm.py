@@ -27,8 +27,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(ROOT, ".env"))
 
 TIMEOUT_SECONDS = 60
-RETRIES = 1               # extra tries after a "busy" error
-RETRY_WAIT_SECONDS = 3
+RETRIES = 2               # extra tries after a "busy" error
+RETRY_WAIT_SECONDS = 3    # default wait between tries
+MAX_RETRY_WAIT_SECONDS = 30
 
 PROVIDERS = {
     "gemini": {
@@ -56,6 +57,16 @@ def get_api_key(provider):
     return key
 
 
+def retry_wait(response):
+    # On a rate limit, APIs say how long to wait in a "retry-after" header
+    # (seconds). Use it, but never wait more than MAX_RETRY_WAIT_SECONDS.
+    try:
+        wait = float(getattr(response, "headers", {}).get("retry-after", RETRY_WAIT_SECONDS))
+    except (TypeError, ValueError):
+        wait = RETRY_WAIT_SECONDS
+    return max(0.0, min(wait, MAX_RETRY_WAIT_SECONDS))
+
+
 def _post(url, headers, body):
     # The only function that touches the network. Tests replace it with a fake.
     # "Busy" errors (429 rate limit, 5xx overloaded) are usually temporary,
@@ -70,7 +81,7 @@ def _post(url, headers, body):
         busy = response.status_code == 429 or response.status_code >= 500
         if not busy or attempt == RETRIES:
             raise LLMError(f"API returned HTTP {response.status_code}: {response.text[:200]}")
-        time.sleep(RETRY_WAIT_SECONDS)
+        time.sleep(retry_wait(response))
 
 
 def _call_gemini(prompt, model, want_json):
