@@ -47,6 +47,8 @@ paths return exactly the same profile format.
    with the same spelling Agent 3 matches on ("python" → "Python").
 3. Checks the reply against a pydantic schema: name required, job dates
    must be `YYYY-MM` or `Present`, and so on.
+   It also asks for the candidate's **projects**, each with a name, role,
+   date, a one-sentence summary and the skills used.
 4. **The LLM only reads; Python does the math.** The LLM returns each job's
    start and end month, and the code calculates months per job (inclusive) and
    total years, the same way as the rule-based parser. Language models are
@@ -73,6 +75,12 @@ with `"parsed_by": "rules"`. The pipeline never breaks because of the LLM.
      plus total years. Dates can be `Aug 2024`, `08/2024` or `2024`, and a
      range can end in `Present`. Months are counted inclusively
      (Jan–Dec 2023 = 12).
+   - **Projects** from the Projects section. A project starts at a title
+     line such as `Car Rental System | Lead Developer Jun 2024`: the part
+     before `|` is the name, the part after is the role, and the date is
+     pulled out. The summary is the project's first bullet (wrapped lines
+     are joined), and the skills are the `skills.txt` keywords found in
+     that project's text.
 
 **Run it**
 ```bash
@@ -97,7 +105,10 @@ our run (identical across two runs):
 | `data/sample.pdf` | The LLM also found **Word** (from "Microsoft Excel, Word"). Rules can't, because "Word" isn't in `skills.txt`. |
 
 Name, contact info, education, jobs, months and total years matched on
-all four. The rule-based parser is already tuned for these formats, so the
+all four. After projects were added, both parsers also found the same
+projects with the same name, role, date and skills on all four. Only the
+summaries differ: the rules copy the first bullet, while the LLM writes its
+own sentence covering the whole project. The rule-based parser is already tuned for these formats, so the
 LLM's advantage is on layouts the rules don't handle (see Known limitations).
 
 **Output format**
@@ -114,6 +125,9 @@ LLM's advantage is on layouts the rules don't handle (see Known limitations).
   "experience": [{"company": "Brightline Analytics", "title": "Junior Data Analyst",
                   "dates": "Jan 2022 - Dec 2023", "months": 24}],
   "experience_years": 3.3,
+  "projects": [{"name": "Sales Trend Dashboard", "role": "Team Lead", "date": "Mar 2022",
+                "summary": "Built an interactive Tableau dashboard ...",
+                "skills": ["SQL", "Tableau", "pandas"]}],
   "parsed_by": "llm",
   "raw_text": "full resume text ..."
 }
@@ -294,6 +308,10 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
   "Company | Title".
 - **Contact and education are simple**: the name is the first header line,
   and only the first degree/institution is read.
+- **Projects assume a layout**: a title line followed by bullets. A title
+  with no `|`, no date and no bullet under it is missed, and a wrapped
+  bullet line that contains a year can be mistaken for a new project. The
+  summary is just the first bullet.
 
 **Agent 1, both paths**
 - **No OCR.** Scanned or image-only PDFs give no text.

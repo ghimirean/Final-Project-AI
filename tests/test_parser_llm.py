@@ -33,6 +33,13 @@ GOOD_REPLY = {
         {"company": "Cedar Grove Library", "title": "Student Assistant",
          "dates": "Sep 2020 - Dec 2021", "start": "2020-09", "end": "2021-12"},
     ],
+    "projects": [
+        {"name": "Sales Trend Dashboard", "role": "Team Lead", "date": "Mar 2022",
+         "summary": "Built a Tableau dashboard showing monthly sales trends.",
+         "skills": ["tableau", "SQL", "pandas", "Data Cleaning"]},
+        {"name": "Library Checkout Analyzer", "role": None, "date": None,
+         "summary": "Wrote scripts to find the most borrowed books.", "skills": ["Python"]},
+    ],
 }
 
 
@@ -95,6 +102,28 @@ def test_present_end_date_counts_to_this_month(fake_gemini):
     assert parse_llm()["experience"][0]["months"] == expected
 
 
+def test_llm_projects(fake_gemini):
+    fake_gemini(json.dumps(GOOD_REPLY))
+    llm_projects = parse_llm()["projects"]
+    rules_projects = parse_resume(RESUME, skills_path=SKILLS)["projects"]
+    assert [p["name"] for p in llm_projects] == [p["name"] for p in rules_projects]
+    assert list(llm_projects[0]) == list(rules_projects[0])      # same fields as rules
+    assert llm_projects[0]["skills"] == ["Tableau", "SQL", "pandas", "Data Cleaning"]
+    assert llm_projects[1]["role"] is None
+
+
+def test_llm_reply_without_projects_gives_empty_list(fake_gemini):
+    fake_gemini(json.dumps({k: v for k, v in GOOD_REPLY.items() if k != "projects"}))
+    profile = parse_llm()
+    assert profile["parsed_by"] == "llm" and profile["projects"] == []
+
+
+def test_prompt_asks_for_projects(fake_gemini):
+    calls = fake_gemini(json.dumps(GOOD_REPLY))
+    parse_llm()
+    assert '"projects"' in calls[0]["prompt"]
+
+
 # ---------- bad LLM answers -> fall back to rules ----------
 
 def assert_fell_back(profile):
@@ -109,6 +138,11 @@ def test_fallback_on_invalid_json(fake_gemini):
 
 def test_fallback_on_missing_name(fake_gemini):
     fake_gemini(json.dumps({k: v for k, v in GOOD_REPLY.items() if k != "name"}))
+    assert_fell_back(parse_llm())
+
+
+def test_fallback_on_project_without_name(fake_gemini):
+    fake_gemini(json.dumps(dict(GOOD_REPLY, projects=[{"role": "Lead", "skills": []}])))
     assert_fell_back(parse_llm())
 
 

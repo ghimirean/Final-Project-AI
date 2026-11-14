@@ -63,8 +63,29 @@ def compare(path):
             print(f"                      {line}")
         differences += 1
 
+    def project_line(p):
+        # Skills are sorted so a different order doesn't count as a difference
+        return f"{p['name']} | {p['role']} | {p['date']} | skills: {', '.join(sorted(p['skills']))}"
+    rules_projects = [project_line(p) for p in rules["projects"]]
+    llm_projects = [project_line(p) for p in llm["projects"]]
+    if rules_projects != llm_projects:
+        print("  projects          rules:")
+        for line in rules_projects:
+            print(f"                      {line}")
+        print("                    llm:")
+        for line in llm_projects:
+            print(f"                      {line}")
+        differences += 1
+    # Summaries are free text (the LLM writes its own sentence), so they are
+    # shown for reading, not counted as a difference
+    for r, l in zip(rules["projects"], llm["projects"]):
+        if r["summary"] != l["summary"]:
+            print(f"  summary of '{l['name']}':")
+            print(f"                      rules: {r['summary']}")
+            print(f"                      llm:   {l['summary']}")
+
     if differences == 0:
-        print("  identical")
+        print("  identical (apart from any summaries shown above)")
     return differences
 
 
