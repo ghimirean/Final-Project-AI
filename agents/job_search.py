@@ -1,11 +1,14 @@
-"""Agent 2: Web Search & Opportunity Agent.
+"""Agent 2 tools: job search building blocks.
 
-Fetches job postings from a provider and returns them in the exact shape
-Agent 3 / run_pipeline() expects:
+The AI part of Agent 2 lives in job_search_agent.py. This module is the
+non-AI toolkit it calls: it fetches job postings from a provider and returns
+them in the exact shape Agent 3 / run_pipeline() expects:
     {id, title, company, location, url, description}   (all strings)
 
     from job_search import search_jobs
     jobs = search_jobs({"keywords": ["Python", "SQL"]}, provider, limit=20)
+
+build_query() is also the rule-based fallback the agent uses if the LLM fails.
 """
 import hashlib
 
