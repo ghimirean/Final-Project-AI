@@ -1,4 +1,15 @@
-"""Agent 2: AI job-search agent (Web Search & Opportunity Agent)."""
+"""Agent 2: AI job-search agent (Web Search & Opportunity Agent).
+
+An LLM reads the candidate profile and decides which searches to run. Our own
+loop executes each search with search_jobs() (the "tool"), shows the LLM a
+short summary of what came back, and the LLM decides to search again or stop.
+No agent frameworks: the loop is plain Python on top of ask_llm().
+
+    result = run_job_agent(profile, provider, location="Remote")
+    result["jobs"]    # [{id, title, company, location, url, description}, ...]
+    result["trace"]   # what the agent thought / searched / saw at each step
+    result["mode"]    # "llm" or "rules" (rules = fell back to build_query)
+"""
 import json
 import logging
 from typing import List, Literal, Optional
