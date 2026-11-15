@@ -8,7 +8,7 @@ calling the agents one by one.
     result["profile"]       # Agent 1 output (without raw_text)
     result["ranked_jobs"]   # Agent 3 output, best match first
 """
-from resume_parser import parse_resume
+from resume_parser import parse_resume, parse_resume_llm
 from job_synthesizer import rank_jobs, SKILLS_PATH
 
 JOB_FIELDS = {"id", "title", "company", "location", "url", "description"}
@@ -26,13 +26,17 @@ def validate_jobs(jobs):
             raise ValueError(f"job #{i} is missing fields: {sorted(missing)}")
 
 
-def run_pipeline(resume_path, jobs):
+def run_pipeline(resume_path, jobs, use_llm=True):
     """Parses a resume (.pdf or .docx) and ranks the given jobs for it.
+    use_llm=True (default): Agent 1 (Gemini) parses the resume and Agent 3
+        (Groq) writes key points, each with a rule-based fallback.
+    use_llm=False: rules only, no API calls.
     Returns {"profile": {...}, "ranked_jobs": [...]}.
     """
     validate_jobs(jobs)
-    profile = parse_resume(resume_path, skills_path=SKILLS_PATH)
-    ranked = rank_jobs(profile, jobs)      # uses raw_text for TF-IDF
+    parse = parse_resume_llm if use_llm else parse_resume
+    profile = parse(resume_path, skills_path=SKILLS_PATH)
+    ranked = rank_jobs(profile, jobs, use_llm=use_llm)   # uses raw_text for similarity
     # raw_text is only needed for scoring; leave it out of the result
     public_profile = {k: v for k, v in profile.items() if k != "raw_text"}
     return {"profile": public_profile, "ranked_jobs": ranked}

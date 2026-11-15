@@ -11,7 +11,7 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "agents"))
 
-from resume_parser import parse_resume, remove_urls  # noqa: E402
+from resume_parser import parse_resume, remove_urls, extract_projects  # noqa: E402
 
 FIXTURES = os.path.join(ROOT, "tests", "fixtures")
 SKILLS = os.path.join(ROOT, "data", "skills.txt")
@@ -98,3 +98,47 @@ def test_sample_pdf_experience_years():
 def test_unsupported_file_type():
     with pytest.raises(ValueError):
         parse_resume(SKILLS)
+
+
+# ---------- projects (rule-based) ----------
+
+def test_projects_with_role_and_date():
+    projects = parse("resume_title_case.docx")["projects"]
+    assert [p["name"] for p in projects] == ["Sales Trend Dashboard", "Library Checkout Analyzer"]
+    first = projects[0]
+    assert first["role"] == "Team Lead"
+    assert first["date"] == "Mar 2022"
+    # The first bullet wraps onto a second line; both parts are joined
+    assert first["summary"] == ("Built an interactive Tableau dashboard on top of "
+                                "SQL queries to show monthly sales trends")
+    assert first["skills"] == ["SQL", "Tableau", "pandas"]
+
+
+def test_project_with_name_only():
+    second = parse("resume_title_case.docx")["projects"][1]
+    assert (second["role"], second["date"]) == (None, None)
+    assert second["skills"] == ["Python"]
+
+
+def test_project_with_date_range():
+    projects = parse("resume_numeric_dates.docx")["projects"]
+    assert len(projects) == 1
+    assert projects[0]["name"] == "Line-Following Robot"
+    assert projects[0]["role"] == "Firmware Developer"
+    assert projects[0]["date"] == "09/2023 - 12/2023"
+    assert projects[0]["skills"] == ["C++", "Linux"]
+
+
+def test_no_projects_section_gives_empty_list():
+    assert parse("resume_comma_skills.docx")["projects"] == []
+
+
+def test_project_dates_do_not_count_as_experience():
+    # Marcus's project has a date range, but his total stays 3.0 years
+    assert parse("resume_numeric_dates.docx")["experience_years"] == 3.0
+
+
+def test_every_project_has_the_same_fields():
+    projects = extract_projects(["Chess Bot | Solo 2023", "- Wrote it in Python"], ["Python"])
+    assert projects == [{"name": "Chess Bot", "role": "Solo", "date": "2023",
+                         "summary": "Wrote it in Python", "skills": ["Python"]}]
