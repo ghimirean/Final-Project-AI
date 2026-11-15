@@ -1,9 +1,14 @@
 """Agent 2: AI job-search agent (Web Search & Opportunity Agent)."""
-from typing import List, Literal, Optional
-from pydantic import BaseModel
-from job_search import experience_level
-
 import json
+import logging
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel
+
+from job_search import build_query, experience_level, search_jobs
+from llm import LLMError, ask_llm
+
+log = logging.getLogger(__name__)
 
 
 # One-line change to switch models. Must differ from Agent 1 (Gemini
@@ -92,3 +97,78 @@ def clean_query(raw, location, level):
 def query_key(query):
     """Same keywords (any order or case) and same title count as the same query."""
     return (tuple(sorted(k.lower() for k in query["keywords"])), query["title"].lower())
+
+
+def observe(step, query, jobs, new_count, total, error=None):
+    """Short summary of one search for the LLM. Only titles and companies are
+    shown (not descriptions), which also limits prompt injection from postings."""
+    obs = {"step": step, "query": query, "returned": len(jobs),
+           "new": new_count, "total_unique": total,
+           "sample": [f"{j['title'][:60]} - {j['company'][:40]}" for j in jobs[:5]]}
+    if error:
+        obs["error"] = error
+    return obs
+
+
+def run_job_agent(profile, provider, location="", limit=20, config=None,
+                  max_steps=MAX_STEPS):
+    """Runs the agent loop and returns {"jobs", "trace", "mode"}."""
+    config = config or LLM_CONFIG
+    level = experience_level(profile.get("experience_years"))
+    summary = profile_summary(profile)
+    found = {}                     # job id -> job (keeps the order found)
+    history, trace, tried = [], [], set()
+    searches = 0
+
+    for step in range(1, max_steps + 1):
+        prompt = build_prompt(summary, location, history, limit, max_steps)
+        try:
+            decision = ask_llm(prompt, config["provider"], config["model"], schema=Decision)
+        except LLMError as e:
+            log.warning("Agent 2 LLM step %d failed: %s", step, e)
+            trace.append({"step": step, "error": str(e)})
+            break
+
+        entry = {"step": step, "thought": decision["thought"], "action": decision["action"]}
+        trace.append(entry)
+        if decision["action"] == "finish":
+            break
+
+        query = clean_query(decision["query"], location, level)
+        entry["query"] = query
+        key = query_key(query)
+        if key in tried:
+            history.append({"step": step, "query": query,
+                            "note": "duplicate query, not run. Try something different or finish."})
+            entry["note"] = "duplicate query skipped"
+            continue
+        tried.add(key)
+
+        error = None
+        try:
+            jobs = search_jobs(query, provider, limit)
+        except Exception as e:  # a provider problem must not crash the pipeline
+            jobs, error = [], type(e).__name__
+        searches += 1
+
+        new_jobs = [j for j in jobs if j["id"] not in found]
+        for job in new_jobs:
+            if len(found) < limit:
+                found[job["id"]] = job
+        entry["returned"], entry["new"] = len(jobs), len(new_jobs)
+        history.append(observe(step, query, jobs, len(new_jobs), len(found), error))
+        if len(found) >= limit:
+            break
+
+    mode = "llm"
+    if searches == 0:
+        # The LLM never got to search (error, or it finished immediately),
+        # so fall back to the rule-based query. The pipeline still works.
+        mode = "rules"
+        log.warning("Agent 2 using rule-based query fallback")
+        query = build_query(profile, location)
+        for job in search_jobs(query, provider, limit):
+            found[job["id"]] = job
+        trace.append({"step": "fallback", "query": query, "returned": len(found)})
+
+    return {"jobs": list(found.values())[:limit], "trace": trace, "mode": mode}
