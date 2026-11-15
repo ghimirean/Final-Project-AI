@@ -65,3 +65,30 @@ def build_prompt(summary, location, history, limit, max_steps):
         f"- Use action \"finish\" (query null) once you have about {limit} good jobs, "
         "or when another search would not help.\n"
     )
+
+
+def clean_query(raw, location, level):
+    """Turns the LLM's query into the dict providers expect. The caller's
+    location always wins; bad values are replaced with safe ones."""
+    raw = raw or {}
+    keywords, seen = [], set()
+    for kw in raw.get("keywords") or []:
+        kw = str(kw).strip()
+        if not kw or kw.lower() in seen:
+            continue
+        seen.add(kw.lower())
+        keywords.append(kw)
+        if len(keywords) >= MAX_KEYWORDS:
+            break
+    chosen = (raw.get("experience_level") or "").strip().lower()
+    return {
+        "keywords": keywords,
+        "title": (raw.get("title") or "").strip(),
+        "location": (location or "").strip(),
+        "experience_level": chosen if chosen in LEVELS else level,
+    }
+
+
+def query_key(query):
+    """Same keywords (any order or case) and same title count as the same query."""
+    return (tuple(sorted(k.lower() for k in query["keywords"])), query["title"].lower())
