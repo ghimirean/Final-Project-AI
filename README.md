@@ -7,11 +7,13 @@ and the **pipeline / API** that connects them to the HITL dashboard and Agent 4.
 | Agent | Kind of AI | Model | What the model does | Fallback |
 |---|---|---|---|---|
 | Agent 1 | **NLP: named-entity recognition** (supervised, trained by us) | spaCy `en_core_web_sm`, fine-tuned on 48 annotated resumes → `models/resume_ner/` | Finds names, companies, schools, degrees, job titles, skills and dates in the resume | Rule-based parser |
-| Agent 3 | **Large language model** | Groq `qwen/qwen3.8-27b` | Key points per job: what the employer wants, fit, gaps, interview topics | Rule-based key points |
-| Agent 3 | **Semantic embeddings** | local `all-MiniLM-L6-v2` (sentence-transformers) | Text-similarity part of the match score | TF-IDF |
+| Agent 3 | **Semantic embeddings / semantic search** (no LLM) | local `all-MiniLM-L6-v2` (sentence-transformers) + KeyBERT | (1) Text-similarity part of the match score; (2) key points per job: KeyBERT picks the posting's key phrases, embedding search checks each against the resume, giving fit, gaps and interview topics | TF-IDF (score), rule-based key points |
 
-Agent 1 can also use Gemini (`gemini-3.5-flash`) as an alternative parser
-(`parser="llm"`). It's kept for comparison and isn't the default.
+Each agent uses a different kind of AI. LLMs are kept only as optional
+comparison baselines, both **off by default**: Agent 1 can parse with Gemini
+(`parser="llm"`), and Agent 3 can write key points with Groq
+(`rank_jobs(..., use_llm=True)`). By default Agents 1 and 3 run entirely on
+this computer, with no API keys.
 
 **No agent frameworks.** LangChain, LangGraph, CrewAI and similar aren't
 used. All orchestration is our own Python code: `agents/pipeline.py` calls
@@ -37,7 +39,7 @@ Every agent calls an LLM through one shared helper,
   read from `.env` with python-dotenv. Keys are never printed or committed.
 - **Per-agent model:** each agent sets its provider and model in one
   `LLM_CONFIG` dict at the top of its file, so switching models is a
-  one-line change. Agent 3 uses `{"provider": "groq", "model": "qwen/qwen3.8-27b"}`.
+  one-line change. Agent 3's optional key points use `{"provider": "groq", "model": "qwen/qwen3.8-27b"}`.
   Agent 1's optional LLM parser uses `{"provider": "gemini", "model": "gemini-3.5-flash"}`.
 - **Validated JSON:** pass a pydantic model as `schema` and the reply is
   parsed as JSON and checked against it. Any problem (missing key, network
@@ -254,20 +256,27 @@ printout and out of the pipeline/API result.
 ## Agent 3 — Job Synthesizer + Match Scoring (`agents/job_synthesizer.py`)
 
 Reads job postings, works out what each one requires, scores how well a
-resume profile fits each job, ranks them, and uses an LLM to pull out the
-**key points** of each job: what the employer is actually looking for, how
-the candidate fits, the gaps, and what the interview agent should ask about.
+resume profile fits each job, ranks them, and pulls out the **key points**
+of each job: what the employer is looking for, how the candidate fits, the
+gaps, and what the interview agent should ask about.
+
+**Kind of AI: semantic embeddings / semantic search.** Both the score and
+the key points come from one local sentence-transformers model
+(`all-MiniLM-L6-v2`). No LLM and no API key in the default path.
 
 **Run it**
 ```bash
 python agents/job_synthesizer.py                                   # sample.pdf + fake jobs
 python agents/job_synthesizer.py path/to/resume.pdf path/to/jobs.json
-python agents/job_synthesizer.py --rules                           # no LLM calls at all
+python agents/job_synthesizer.py --rules                           # rule-based resume parser
+python agents/job_synthesizer.py --llm                             # optional Groq key points
 ```
 Prints a ranking table followed by the key points of every job, and saves
-everything to `output/ranked_jobs.json`. The full run (Gemini parse,
-embeddings, one Groq call per job) took about 1.5 minutes for 6 jobs,
-mostly spent waiting on Groq's free-tier rate limit (see Known limitations).
+everything to `output/ranked_jobs.json`. The default run (NER parse,
+embeddings, KeyBERT) takes about 3 seconds for 6 jobs once the model is
+loaded. `pip install -r requirements.txt` installs everything; the
+embedding model (about 90 MB) downloads automatically the first time it's
+used, then works offline.
 
 **Job input format** — a JSON list of postings (all values are strings):
 ```json
@@ -297,84 +306,133 @@ through for display. `tests/fixtures/jobs.json` has 6 fake examples.
   "id": "job-002",
   "title": "Software Engineering Intern",
   "company": "...", "location": "...", "url": "...",
-  "score": 84.0,
-  "matched_skills": ["Java", "C++", "Git", "GitHub", "Data Structures", "Algorithms"],
-  "missing_skills": ["Linux"],
-  "reason": "Matches 6/7 skills; missing Linux.",
-  "breakdown": {"skill_points": 51.4, "text_similarity": 0.494, "text_points": 32.5,
-                "text_method": "embeddings",
-                "required_years": 0, "candidate_years": 2.6, "experience_penalty": 0,
-                "required_degree": "Bachelor", "candidate_degree": "Bachelor",
-                "degree_penalty": 0},
+  "score": 67.0,
+  "matched_skills": ["Java", "C++", "Git", "Linux"],
+  "missing_skills": ["GitHub", "Data Structures", "Algorithms"],
+  "reason": "Matches 4/7 skills; missing GitHub, Data Structures, Algorithms.",
+  "breakdown": {"skill_points": 34.3, "text_similarity": 0.495, "text_points": 32.7,
+                "text_method": "embeddings", "...": "..."},
   "assessment": {
-    "key_points": ["Ability to work with performance-critical C++ services",
-                   "Strong foundational knowledge of Algorithms and Data Structures", "..."],
-    "required_skills": ["C++", "Java", "Linux", "Algorithms", "Data Structures"],
+    "key_points": ["Summer internship", "Computer Science", "performance-critical C++ services",
+                   "GitHub", "Bachelor", "Linux"],
+    "required_skills": ["Java", "C++", "Linux", "Data Structures", "Algorithms"],
     "nice_to_have": ["Git", "GitHub"],
-    "fit_summary": "The candidate is a strong fit due to their relevant CS degree, ...",
-    "gaps": ["Linux"],
-    "interview_focus": ["Probing the candidate's experience with Linux environments, ...", "..."]
+    "fit_summary": "Matches 4/7 skills; missing GitHub, Data Structures, Algorithms. The resume shows 5 of 6 key points of the posting.",
+    "gaps": ["Data Structures", "Algorithms", "Summer internship"],
+    "interview_focus": ["Data Structures (asked for, not on the resume)", "...",
+                        "performance-critical C++ services (ask for an example; resume: skills: C++)"],
+    "key_point_matches": [
+      {"phrase": "Summer internship", "relevance": 0.664, "resume_similarity": 0.41,
+       "covered": false, "evidence": null},
+      {"phrase": "Computer Science", "relevance": 0.51, "resume_similarity": 0.669,
+       "covered": true, "evidence": "Bachelor of Science in Computer Engineering"},
+      "..."
+    ]
   },
-  "assessed_by": "llm"
+  "assessed_by": "embeddings"
 }
 ```
+(Fake resume `tests/fixtures/resume_numeric_dates.docx`. `assessed_by` is
+`"embeddings"` by default, `"rules"` if the embedding model is unavailable,
+or `"llm"` when the optional Groq key points are on.)
 
-### Key points (LLM, `assess_job`)
+### Key points (KeyBERT + embeddings, default — `agents/keypoints.py`)
 
-For each job, Agent 3 sends Groq (`qwen/qwen3.8-27b`) the job posting, a
-short candidate summary, and the score our code already computed. It gets
-back validated JSON:
+1. **Candidate phrases.** spaCy's general English model (`en_core_web_sm`,
+   the same pinned package Agent 1 builds on) finds the noun phrases in the
+   posting ("OOP principles", "high-traffic payment services"). Leading or
+   trailing filler words ("strong", "knowledge", "requirements") are cut.
+2. **KeyBERT picks the key phrases.** It embeds the whole posting and every
+   candidate phrase with Agent 3's own model, and keeps the 6 phrases
+   closest in meaning to the posting. MMR (diversity 0.5) keeps them
+   different from each other, so you don't get five versions of
+   "internship". KeyBERT gets our `embeddings.embed()` as its model, so the
+   model is loaded only once.
+3. **Semantic search against the resume.** Each key phrase is embedded and
+   compared with every resume line of 3+ words (shorter lines are headings
+   like "Work Experience", which match almost anything). A phrase is
+   **covered** if the resume lists one of its skills, or if a line reaches
+   similarity **0.45**. The best line is kept as `evidence` so a person can
+   check it.
+4. **The fields**, built in Python from the phrases, the skill list and the matches:
 
-| Field | Meaning |
+| Field | How |
 |---|---|
-| `key_points` | 1–8 points on what the employer is actually looking for |
-| `required_skills` | what the posting says is required |
-| `nice_to_have` | what the posting calls a plus / preferred |
-| `fit_summary` | 1–2 sentences on how well the candidate fits |
-| `gaps` | what the candidate is missing for this job |
-| `interview_focus` | 1–6 topics **the interview agent should ask about** |
+| `key_points` | the KeyBERT phrases, most relevant first |
+| `required_skills` | the posting's skills from `data/skills.txt`, minus the nice-to-haves |
+| `nice_to_have` | skills in a sentence with "plus", "bonus", "preferred", "desired", … |
+| `fit_summary` | the one-line `reason` + "the resume shows K of N key points" |
+| `gaps` | missing required skills, key phrases with no resume evidence, years/degree gaps |
+| `interview_focus` | up to 3 gaps to probe first, then covered key points to ask for an example of, with the resume evidence |
+| `key_point_matches` | every phrase with its relevance, resume similarity, covered and evidence |
 
-- **Only the top N jobs** (default 5, `LLM_CONFIG["top_n"]`) get LLM key
-  points. Jobs are scored and sorted first, then the best N are sent to
-  Groq. The rest get the rule-based version. This keeps long job lists fast
-  and inside the rate limit.
-- **Accurate candidate facts.** If the graduation date is in the future,
-  the summary says the degree is `expected May 2028, in progress`, and the
-  prompt tells the model it must not claim the degree is completed. The
-  total years are labeled as "all jobs, related or not", and the model is
-  told to count only experience relevant to the posting (a cashier job
-  doesn't count toward "1+ years building websites").
-- **The LLM does not change the score.** The score is computed by code
-  before the LLM is called. The schema has no score field, so even if the
-  model sends one, it's dropped.
-- **Privacy:** the candidate summary includes skills, education, job titles
-  and projects, but not the name, email, phone or links.
-- **Fallback:** if Groq fails (missing key, rate limit after retries, bad
-  JSON, missing fields), the same six fields are filled from the rule-based
-  requirements: key points list the required skills, years and degree,
-  `fit_summary` is the one-line `reason`, `gaps` are the missing skills
-  plus any experience/degree gap, and `interview_focus` lists the missing
-  skills first, then the matched ones. `assessed_by` says which was used:
-  `"llm"` or `"rules"`.
-- **Why Qwen:** we compared the Groq models available in Nov 2026
-  (`gpt-oss-120b`, `gpt-oss-20b`, `qwen3.8-27b`) on the same jobs. Qwen
-  stayed closest to the postings (the others invented "nice to have"
-  skills or misread the candidate's degree status), used the candidate's
-  projects in its interview topics, and was the fastest (~1 s per job).
+- **Why 0.45?** Measured on the 3 fake fixture resumes × 6 fixture jobs:
+  real matches ("dashboards" for the data analyst, 0.54; "building
+  websites" for the web developer, 0.47) were ≥ 0.45, and unrelated phrases
+  were mostly below 0.40.
+- **The key points never change the score.** The score is computed first,
+  by the scoring code.
+- **Speed and privacy:** about 0.3 s per job, offline, nothing sent anywhere.
+- **Fallback:** if the embedding model or KeyBERT can't be used, one
+  warning is printed and every job gets the rule-based key points (the
+  required skills, years and degree; `gaps` = missing skills + years/degree;
+  `interview_focus` = missing skills, then matched ones).
 
-### Example run: `data/sample.pdf` + `tests/fixtures/jobs.json`
+### Optional: LLM key points (Groq, off by default)
 
-Resume parsed by Gemini, text similarity from embeddings, key points by
-Qwen for all 6 jobs:
+The earlier LLM version is kept for comparison: `rank_jobs(profile, jobs,
+use_llm=True)`, `run_pipeline(..., llm_key_points=True)` or
+`python agents/job_synthesizer.py --llm`. It sends Groq (`qwen/qwen3.8-27b`)
+the posting, a candidate summary without contact details (graduation stated
+as "in progress" when it's in the future; total years labeled "related or
+not"), and the score our code computed, and gets back the same fields as
+validated JSON. Only the top 5 jobs (`LLM_CONFIG["top_n"]`) go to Groq;
+the rest, and any job where Groq fails, get the embedding version. The LLM
+never changes the score (the schema has no score field). Qwen was chosen
+over `gpt-oss-120b` / `gpt-oss-20b` for staying closest to the postings.
 
-| # | Score | Job | Key points (what they want) | Gaps | Interview focus (first topics) |
-|---|---|---|---|---|---|
-| 1 | 100.0 | Junior Java Developer | Clean OOP code, data structures & algorithms, Java, Git, CS background | none | Car Rental System's OOP design; data-structure depth; Git workflow |
-| 2 | 84.0 | Software Engineering Intern | Performance-critical C++, algorithms, Linux, Java tooling, current CS student | Linux | Linux experience; C++ performance practices; algorithm problem-solving |
-| 3 | 39.1 | Frontend Web Developer | Responsive sites for small businesses, React + TypeScript, working with designers, Git | JavaScript, TypeScript, React | Any JS/React work; Java/OOP → TypeScript; responsive design |
-| 4 | 11.3 | Data Science Intern | Python + pandas, SQL, basic ML with scikit-learn, stats/CS background | Python, SQL, Tableau, ML, pandas, scikit-learn | Motivation to switch to data science; any Python/SQL self-study |
-| 5 | 9.3 | Senior Backend Engineer | Lead high-traffic payment systems, mentoring, Java/SQL/Docker/AWS, 5+ years | 5+ years, SQL, Docker, AWS, REST API, mentoring | Real backend experience; payment-system design; SQL/Docker exposure |
-| 6 | 6.9 | Machine Learning Engineer | Deep learning for NLP/vision, Python, PyTorch/TensorFlow, Docker on AWS, Master's | Python, PyTorch/TensorFlow, Docker/AWS, ML background, Master's | Motivation for ML; steps taken to learn Python/PyTorch; the Master's requirement |
+### KeyBERT vs. Groq key points (`scripts/compare_key_points.py`)
+
+Same fake resume (`resume_numeric_dates.docx`: Computer Engineering
+graduate, C++/Java/Docker/Linux, robotics internship) and the 6 fixture
+jobs. Run on 2026-11-16:
+
+| Job | KeyBERT + embeddings: key points | Groq `qwen3.8-27b`: key points (shortened) |
+|---|---|---|
+| Junior Java Developer | junior developer, Java, Computer Science, internal tools, Git, clean code | Clean OOP code in Java; data structures & algorithms; Git; CS background, no experience needed |
+| Software Engineering Intern | Summer internship, Computer Science, performance-critical C++ services, GitHub, Bachelor, Linux | Algorithms & data structures; performance-critical C++; Java tooling; current CS students; Linux |
+| Data Science Intern | Tableau, analytics, dashboards, customer data, scikit-learn, Bachelor | Python + pandas data cleaning; SQL; basic ML with scikit-learn; Statistics/Data Science/CS background |
+| Machine Learning Engineer | TensorFlow, Design and train Deep Learning models, Computer Vision products, AWS, Computer Science, Docker | Deep learning for NLP + vision; Python daily; PyTorch & TensorFlow; Docker on AWS; Master's required |
+| Senior Backend Engineer | professional backend, AWS, high-traffic payment services, Java, Docker containers, REST API layer | Lead design of high-traffic payment services; mentor juniors / own architecture; Java + REST; PostgreSQL + SQL; containers on AWS |
+| Frontend Web Developer | building websites, responsive websites, small business clients, designers, React, Git | Responsive sites for small businesses; HTML/CSS/JS/TS/React; Git on every project; working with designers; 1+ year building websites |
+
+| | KeyBERT + embeddings | Groq LLM |
+|---|---|---|
+| Time for 6 jobs | **1.8 s** | 88 s (free-tier rate limit) |
+| API calls / key needed | 0 / no | 6 / yes |
+| Data leaves the computer | no | job text + candidate summary |
+| Same answer every run | yes | no |
+| Groq's 28 key points with a matching KeyBERT phrase (embedding similarity ≥ 0.5) | 16 / 28 (mean best similarity 0.54) | — |
+| Match scores | identical | identical |
+
+What the comparison shows:
+- **Same topics, different form.** KeyBERT returns short phrases taken
+  from the posting; Groq writes sentences. Most of Groq's points that
+  KeyBERT "missed" are plain skill lists (Python, pandas, SQL, PostgreSQL),
+  which Agent 3 already reports in `required_skills` and `gaps` from the
+  skill list.
+- **Groq reasons about the candidate; KeyBERT can't.** Groq noticed that the
+  candidate already graduated (so a current-student internship doesn't fit),
+  that Computer Engineering ≠ Computer Science, and that only 1.5 of the
+  3 years were relevant, and it wrote interview questions about the
+  candidate's own robotics project. KeyBERT counted "Computer Science" as
+  covered because of the "Computer Engineering" line (similarity 0.67).
+- **KeyBERT is more literal:** some picks are generic ("Bachelor",
+  "Computer Science", "junior developer"), and descriptive phrases like
+  "internal tools" become gaps when the resume doesn't mention them.
+- **Why embeddings are the default anyway:** a different kind of AI from
+  Agent 2's LLM (the course requirement), offline, free, deterministic,
+  50× faster, and every key point carries its evidence.
 
 ### How scoring works
 
@@ -435,15 +493,17 @@ result = run_pipeline("data/sample.pdf", jobs)   # jobs = list of job dicts
 result["profile"]       # Agent 1 output, without raw_text
 result["ranked_jobs"]   # Agent 3 output, best match first
 
-run_pipeline("data/sample.pdf", jobs, parser="llm")    # Agent 1 uses Gemini instead
-run_pipeline("data/sample.pdf", jobs, use_llm=False)   # no API calls at all
+run_pipeline("data/sample.pdf", jobs, parser="llm")             # Agent 1 uses Gemini instead
+run_pipeline("data/sample.pdf", jobs, llm_key_points=True)      # Agent 3 key points from Groq
+run_pipeline("data/sample.pdf", jobs, use_llm=False)            # forbid every API call
 ```
 It checks the job list first and raises `ValueError` if a job is missing fields.
-By default Agent 1 parses with the local NER model (`parser="ner"`) and Agent 3
-writes key points with Groq (`use_llm=True`), each with its own fallback.
-`parser` can be `"ner"`, `"llm"` or `"rules"`. `use_llm=False` makes no API
-calls at all (an `"llm"` parser then becomes `"rules"`). The API always uses
-the defaults.
+By default everything runs locally: Agent 1 parses with the NER model
+(`parser="ner"`) and Agent 3 scores and writes key points with embeddings
+(KeyBERT), each with its own fallback. No API calls are made unless you ask
+for an LLM. `parser` can be `"ner"`, `"llm"` or `"rules"`. `use_llm=False`
+forbids all API calls (an `"llm"` parser becomes `"rules"` and
+`llm_key_points` is ignored). The API always uses the defaults.
 
 **Web API** (`api.py`, FastAPI):
 ```bash
@@ -478,19 +538,21 @@ see the **Actions** tab on GitHub, or the ✓ / ✗ next to each commit.
 | `tests/test_parser.py` | Agent 1 rule-based parser on 3 fake resumes with different heading, date and skill styles |
 | `tests/test_parser_llm.py` | Agent 1 LLM parser: same format as rules, cleanup, every fallback case |
 | `tests/test_ner_data.py` | The annotated NER data: offsets match the text, spans on token boundaries, no overlaps, every label present, labeling rules followed, file matches the generator |
-| `tests/test_train_ner.py` | Train/test split, exact-match P/R/F1 on known cases, a 1-epoch training smoke run, saved model metrics (if built) |
-| `tests/test_parser_ner.py` | NER parser with a fake "perfect" model: same profile as rules on the 3 fixtures, Python date math, model mistakes filtered (fake dates, project roles, links), fallback when the model is missing or crashes, pipeline default; plus the real model (if built) |
-| `tests/test_job_synthesizer.py` | Requirement extraction, scoring, penalties, ranking (on the TF-IDF fallback), LLM key points with a fake Groq: score unchanged, no contact details in the prompt, every fallback case |
+| `tests/test_train_ner.py` | Train/test split, exact-match P/R/F1 on known cases, a 1-epoch training smoke run, the committed model's saved metrics |
+| `tests/test_parser_ner.py` | NER parser with a fake "perfect" model: same profile as rules on the 3 fixtures, Python date math, model mistakes filtered (fake dates, project roles, links), loud fallback when the model is missing, broken or crashes, pipeline default; plus the real committed model (F1 ≥ 0.90 on the hand-annotated resumes) |
+| `tests/test_job_synthesizer.py` | Requirement extraction, scoring, penalties, ranking (on the TF-IDF fallback), the optional LLM key points with a fake Groq: score unchanged, no contact details in the prompt, every fallback case |
+| `tests/test_keypoints.py` | Embedding key points: spaCy candidate phrases, the real KeyBERT on a fake embedding model, resume matching (by skill, by similarity, not at all), nice-to-haves, field building, no Groq calls by default, score unchanged, fallbacks, the KeyBERT-vs-Groq matching in `scripts/compare_key_points.py` |
 | `tests/test_embeddings.py` | Chunking, best-chunk similarity, the 0–40 mapping, scores not depending on other jobs, fallback |
 | `tests/test_pipeline.py` | `run_pipeline` and the `/rank` endpoint (FastAPI `TestClient`) |
 
-**Tests never call a real LLM or load the real embedding or NER model.**
+**Tests never call a real LLM or load the real embedding model.**
 `tests/conftest.py` blocks the network function in `agents/llm.py`, the
-model loader in `agents/embeddings.py` and the NER loader in
-`agents/resume_parser.py` for every test. Tests that need a reply, an
-embedding or entities install a fake one. The suite runs offline, without
-API keys, downloads nothing, and passes without a trained model (the few
-tests that use the real NER model are skipped when it isn't built).
+model loader in `agents/embeddings.py`, KeyBERT in `agents/keypoints.py` and
+the NER loader in `agents/resume_parser.py` for every test. Tests that need
+a reply, an embedding or entities install a fake one. The suite runs
+offline, without API keys, and downloads nothing. The NER model is committed
+in git, so the tests that load the real NER model always run, and they fail
+if it's missing or broken.
 
 All test data is fake: `tests/fixtures/` holds invented resumes (rebuild
 them with `python tests/fixtures/make_fixtures.py`) and invented job postings.
@@ -554,21 +616,27 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
 - Overlapping jobs are added together, and year-only dates are approximated
   (start = January, end = December).
 
-**Agent 3, key points (LLM)**
-- **Groq free-tier rate limit:** `qwen/qwen3.8-27b` allows 1,000 output
-  tokens per minute, about 3 jobs. With the default top 5, a run waits on
-  retries (about 1.3 minutes), and if a wait would exceed the retry budget,
-  that job falls back to rule-based key points. Check `assessed_by`.
-- **The LLM can misjudge the candidate.** Before the fixes above it said a
-  student still studying "possesses the required Bachelor's degree" and
-  counted cashier years toward "1+ years building websites". Both are fixed
-  in our test run, but the model can still misjudge relevance (e.g. whether
-  a "Test Lead" job was technical). Key points are guidance for the
-  interview agent, not facts. The score doesn't depend on them.
-- **Output can vary between runs**, and job postings could contain
-  instructions aimed at the model (prompt injection), the same as for Agent 1.
-- **Job text is sent to Groq**, and so is a summary of the candidate
-  without contact details.
+**Agent 3, key points (KeyBERT + embeddings, default)**
+- **No reasoning about the candidate.** Embedding similarity can't tell
+  that a graduate doesn't fit a current-student internship, or that
+  Computer Engineering isn't Computer Science (it counted that line as
+  evidence, similarity 0.67). The evidence line is shown so a person or the
+  interview agent can judge it.
+- **Phrases, not explanations.** Some picks are generic ("Bachelor",
+  "Computer Science"), and descriptive phrases ("internal tools") become
+  gaps when the resume doesn't use similar words.
+- **The 0.45 threshold** was measured on only 3 fake resumes and 6 jobs,
+  and fits only this model. "data science" vs. a "Computer Science" line
+  scored 0.53, so a few related-but-different phrases count as covered.
+- **Nice-to-haves are cue words**: only skills in a sentence with "plus",
+  "bonus", "preferred", … are found.
+
+**Agent 3, key points (optional LLM, off by default)**
+- **Groq free-tier rate limit:** about 3 jobs per minute (88 s for 6 jobs
+  in the comparison run). Jobs where Groq fails get the embedding version.
+- **The LLM can misjudge the candidate**, its output varies between runs,
+  and job postings could contain instructions aimed at the model.
+- **Job text and a candidate summary (no contact details) are sent to Groq.**
 
 **Agent 3, scoring**
 - **Job requirement parsing is regex-based**: `min_years` takes the largest

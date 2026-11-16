@@ -191,6 +191,17 @@ def test_groq_failure_falls_back_to_embeddings(keybert, monkeypatch):
     assert ranked[0]["assessed_by"] == "embeddings"
 
 
+def test_comparison_script_matches_llm_points_to_phrases(fake_model):
+    import sys
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    from compare_key_points import captured
+    pairs = captured(["Write clean Java code for internal tools", "Build Tableau dashboards"],
+                     ["internal tools", "Tableau", "Git"])
+    assert [phrase for phrase, _ in pairs] == ["internal tools", "Tableau"]
+    assert all(0 <= s <= 1 for _, s in pairs)
+    assert captured([], ["Java"]) == []
+
+
 def test_model_failure_warns_once_and_uses_rules(monkeypatch, capsys):
     ranked = rank_jobs(STUDENT, list(JOBS.values()))          # conftest blocks KeyBERT
     assert {r["assessed_by"] for r in ranked} == {"rules"}
