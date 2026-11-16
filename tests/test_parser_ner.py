@@ -283,3 +283,38 @@ def test_missing_company_recovered_from_title_line():
                             ("Aug 2024", "DATE"), ("Dec 2024", "DATE")], [])
     assert p["experience"] == [{"company": "Chick-fil-A", "title": "Team Member (Cashier)",
                                 "dates": "Aug 2024 – Dec 2024", "months": 5}]
+
+
+# ---------- name fallback ----------
+
+from resume_parser import choose_name, looks_like_name  # noqa: E402
+
+
+@pytest.mark.parametrize("line, ok", [
+    ("Mei-Ling Castellanos", True), ("ANN LEE", True), ("Md Kamrul Islam", True),
+    ("Jordan Okafor-Bell", True), ("Siobhan O'Neil", True),
+    ("Lumen Web Studio", False),                        # organisation word
+    ("Curriculum Vitae", False), ("Ann", False),        # not a name / one word
+    ("ann lee", False),                                 # not capitalised
+    ("ann@example.com", False), ("Ann Lee | (555) 201-3344", False),
+    ("Senior Software Engineer At Big Company Today", False),   # too many words
+])
+def test_looks_like_name(line, ok):
+    assert looks_like_name(line) == ok
+
+
+def person(text):
+    return {"label": "PERSON", "text": text}
+
+
+@pytest.mark.parametrize("persons, text, name", [
+    ([person("Web Studio")], "Mei-Ling Castellanos\nLumen Web Studio | Dev", "Mei-Ling Castellanos"),   # org-like
+    ([], "Mei-Ling Castellanos\nmei@example.org", "Mei-Ling Castellanos"),                             # missing
+    ([person("Jordan Okafor")], "Jordan Okafor-Bell\nSKILLS", "Jordan Okafor-Bell"),                   # cut in two
+    ([person("Ann Lee")], "\n  Ann Lee  \nann@example.com", "Ann Lee"),                                # NER right
+    ([person("ANN LEE")], "ANN LEE\nann@example.com", "Ann Lee"),                                      # title-cased
+    ([person("Web Studio")], "RESUME\nLumen Web Studio", None),         # never an organisation
+    ([], "ann@example.com\nSkills", None),
+])
+def test_choose_name(persons, text, name):
+    assert choose_name(persons, text) == name

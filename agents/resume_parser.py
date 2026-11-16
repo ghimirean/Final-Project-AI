@@ -558,6 +558,50 @@ def non_job_lines(text):
     return lines
 
 
+# Words that mark an organisation, not a person ("Web Studio", "Eastvale University")
+ORG_WORDS = {
+    "inc", "llc", "ltd", "corp", "corporation", "company", "co", "group", "studio", "studios",
+    "labs", "lab", "systems", "solutions", "technologies", "tech", "media", "logistics",
+    "university", "college", "institute", "school", "academy", "bank", "bookshop", "store",
+    "shop", "cafe", "diner", "restaurant", "bakery", "club", "department", "agency",
+    "consulting", "services", "partners", "foundation", "association", "hospital", "clinic",
+    "center", "centre", "robotics", "analytics", "software", "library",
+}
+NOT_NAMES = {"resume", "résumé", "curriculum", "vitae", "cv", "profile", "contact"}
+NAME_WORD = r"[A-Z][a-zA-Z'’.]*(?:-[A-Z][a-zA-Z'’.]*)*"     # Ann, O'Neil, Mei-Ling, Okafor-Bell
+
+
+def looks_like_org(text):
+    return any(w.lower().strip(".,") in ORG_WORDS for w in text.split())
+
+
+def looks_like_name(line):
+    """2-4 capitalised words, no digits, @, |, commas or colons: "Mei-Ling
+    Castellanos", "ANN LEE". Not an organisation, not "Curriculum Vitae"."""
+    words = line.split()
+    if not 2 <= len(words) <= 4 or re.search(r"[\d@|,:]", line):
+        return False
+    if looks_like_org(line) or any(w.lower() in NOT_NAMES for w in words):
+        return False
+    return all(re.fullmatch(NAME_WORD, w.title() if w.isupper() else w) for w in words)
+
+
+def choose_name(persons, text):
+    """The candidate's name. NER's first PERSON, unless it is missing, looks
+    like an organisation, or is only part of the first line (a hyphenated
+    name cut in two): then the resume's first non-empty line, if that looks
+    like a name. An organisation is never returned as a name."""
+    first_line = next((line.strip() for line in text.split("\n") if line.strip()), "")
+    name = persons[0]["text"] if persons else None
+    first_is_name = looks_like_name(first_line)
+    if first_is_name and (name is None or looks_like_org(name)
+                          or (name != first_line and name in first_line)):
+        name = first_line
+    elif name is not None and looks_like_org(name):
+        name = None
+    return name.title() if name and name.isupper() else name
+
+
 def company_from_line(line, title):
     """Rule-based fallback when NER finds a job title but no company.
     Returns (company, title). The title's line is split exactly like the
@@ -584,9 +628,7 @@ def build_profile_from_ner(ents, text, skill_list):
 
     # Contact: name from NER; email/phone/links have fixed patterns, so regex
     profile = extract_contact(text.split("\n"))
-    persons = by_label("PERSON")
-    name = persons[0]["text"] if persons else profile["name"]
-    profile["name"] = name.title() if name and name.isupper() else name
+    profile["name"] = choose_name(by_label("PERSON"), text)
 
     # Skills, step 1 = ENTITY LINKING: each SKILL entity is linked to the
     # canonical skills.txt names it contains ("Java Programming" -> Java,

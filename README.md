@@ -77,7 +77,7 @@ entities of given types. Ours recognizes six types:
 1. Read the text (same readers as the rule-based path).
 2. Run the trained model to get the entities.
 3. Assemble them by layout:
-   - name = first `PERSON`
+   - name = first `PERSON`, unless it is missing, looks like an organisation ("Web Studio": contains Studio, University, Inc, …) or is only part of the first line (a hyphenated name cut in two); then the resume's first non-empty line if it looks like a name (2–4 capitalised words, no digits, `@` or `|`). An organisation is never used as the name
    - skills, by **entity linking**: each `SKILL` entity is mapped to the
      canonical `skills.txt` names it contains ("Java Programming" → Java,
      "Microsoft Excel" → Excel, "Object-Oriented Programming" → OOP; other
@@ -607,7 +607,7 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
   size (30 → 60 resumes), and the extra sections (coursework, languages,
   leadership) were added after looking at how the model failed on
   `data/sample.pdf`. Treat 0.942 as optimistic for real resumes.
-- **Known model mistakes:** hyphenated names split, hyphenated brand names
+- **Known model mistakes:** hyphenated names split (fixed by the name fallback when the name is the first line), hyphenated brand names
   ("Chick-fil-A") not seen as companies, place names or course names
   tagged as skills, a company and a job title swapped in unfamiliar layouts.
   Entity linking now drops skill entities that aren't known skills, the
@@ -620,25 +620,24 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
   so the model must be retrained (`python scripts/train_ner.py`).
 - **The future-work rule is word-based:** a real skill mentioned only in a
   sentence that also says "learning" or "plan" is dropped.
-- **Unseen layouts break it (not fixed yet).** `scripts/check_unseen_layouts.py`
-  runs 3 fake resumes the model never saw (`tests/fixtures/unseen/`): NER
-  gets **16/24** fields right, the rules 14/24. Skills and emails were right
-  in all three. What breaks:
+- **Unseen layouts.** `scripts/check_unseen_layouts.py` runs 3 fake resumes
+  the model never saw (`tests/fixtures/unseen/`). NER gets **19/24** fields
+  right, the rules 16/24 (before the season-date and name fixes: 16/24 and
+  14/24). Skills and emails are right in all three. Still broken:
   - *Two-column PDF:* the PDF reader merges the columns line by line
     ("Python, SQL, Docker Harborline Logistics | …"), so a skill becomes part
     of a company name ("Docker Harborline Logistics"), the degree is cut at
     the column break ("Associate of Science in"), the graduation date is
     taken from the job next to it (Jan 2021 instead of May 2023), and the
-    hyphenated name is cut ("Jordan Okafor"), and the other column's
-    heading sticks to a company ("EDUCATION Copperfield Diner").
-  - *No section headings:* the name was tagged ORG, so the "name" became
-    "Web Studio" (a PERSON tag inside "Lumen Web Studio"), and the first job
-    was lost because "Front-End Developer" was tagged ORG, not JOB_TITLE. The
-    rule-based parser finds no jobs or education at all without headings.
-  - *Season dates* ("Fall 2023 - Spring 2024"): the model tags them as DATE,
-    but the date math can't read seasons, so the job gets 0 months and the
-    graduation "Expected Spring 2026" is empty. The second job is missing:
-    "Software Lead" wasn't tagged as a job title.
+    other column's heading sticks to a company ("EDUCATION Copperfield
+    Diner"). (The name is now right.)
+  - *No section headings:* the first job is lost because "Front-End
+    Developer" was tagged ORG, not JOB_TITLE. The rule-based parser finds no
+    jobs or education at all without headings. (The name is now right.)
+  - *Season dates* (now read: Spring = Jan, Summer = Jun, Fall = Sep,
+    Winter = Dec, so "Fall 2023 – Spring 2024" = 5 months): the second job
+    is missing because "Software Lead" wasn't tagged as a job title. The
+    rule-based parser gets this resume fully right.
 - **Layout still matters** for grouping entities into jobs and education
   (same line or neighbouring lines).
 - The trained model (15 MB) is committed in `models/resume_ner/`, so every
