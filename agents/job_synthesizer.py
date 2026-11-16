@@ -21,10 +21,17 @@ WHAT AGENT 3 DOES
 -----------------
 1. Rule-based requirements (skills, years, degree) from each description.
 2. A 0-100 match score: skills + embedding similarity - penalties.
-   The score is always computed by code, never by the LLM.
-3. LLM key points (Groq): what the employer is really looking for, the
-   candidate's fit and gaps, and topics for the interview agent. If the
-   LLM fails, a rule-based version is used ("assessed_by": "llm" | "rules").
+   The score is always computed by code.
+3. Key points with embeddings (KeyBERT, agents/keypoints.py): the phrases
+   that capture what the posting is about, checked against the resume by
+   embedding similarity, which gives the candidate's fit, gaps and topics
+   for the interview agent. No LLM. If the embedding model is unavailable,
+   a rule-based version is used ("assessed_by": "embeddings" | "rules").
+   The older Groq LLM key points are still here but OFF by default
+   (rank_jobs(..., use_llm=True) turns them on; "assessed_by": "llm").
+
+Agent 3's kind of AI: semantic embeddings / semantic search (a local
+sentence-transformers model), not a generative LLM.
 """
 import json
 import os
@@ -39,11 +46,15 @@ from pydantic import BaseModel, Field
 
 from datetime import date
 
-from resume_parser import load_skills, extract_skills, to_months
-from embeddings import resume_job_similarities, EmbeddingError
+from resume_parser import load_skills, extract_skills, resume_skills_in_text, to_months
+from embeddings import embed, resume_job_similarities, EmbeddingError
+from keypoints import (KEYPOINT_CONFIG, content_words, extract_keyphrases, is_evidence,
+                       match_phrases, resume_lines)
 from llm import ask_llm, LLMError
 
-# Agent 3's LLM. Change this one line to switch provider or model.
+# OPTIONAL LLM key points (OFF by default: Agent 3 uses embeddings, and
+# Agent 2 is the project's LLM agent). Kept for comparison; turn on with
+# rank_jobs(..., use_llm=True). Change this one line to switch model.
 # Chosen after comparing the Groq models available in Nov 2026 on the same
 # jobs: qwen3.8-27b stayed closest to the posting (no invented
 # "nice to have" skills), used the candidate's projects in its interview
@@ -214,6 +225,23 @@ def text_scores(profile, jobs):
                 for r, s in zip(raw, scaled)]
 
 
+def candidate_skills(profile, skill_list=None):
+    """The candidate's skills for matching: Agent 1's skills, plus every
+    skill from skills.txt that appears anywhere in the resume text. Agent 1
+    (NER) only takes skills from skill-like places, so a skill mentioned only
+    in a course ("Analysis of Algorithms") or a project line would otherwise
+    be missed. Agent 1's own output is not changed."""
+    if skill_list is None:
+        skill_list = load_skills(SKILLS_PATH)
+    skills = list(profile.get("skills", []))
+    seen = {s.lower() for s in skills}
+    for skill in resume_skills_in_text(profile.get("raw_text") or "", skill_list):
+        if skill.lower() not in seen:
+            seen.add(skill.lower())
+            skills.append(skill)
+    return skills
+
+
 def score_match(profile, job, skill_list=None, text_score=None):
     """Scores how well a resume profile fits one job, from 0 to 100.
     Returns {"score": float, "breakdown": {...}} so the score can be explained.
@@ -223,9 +251,10 @@ def score_match(profile, job, skill_list=None, text_score=None):
     one job (with embeddings that gives the same points as inside a ranking).
     """
     req = extract_requirements(job, skill_list)
-    have = set(profile.get("skills", []))
-    matched = [s for s in req["skills"] if s in have]
-    missing = [s for s in req["skills"] if s not in have]
+    have = {s.lower() for s in candidate_skills(profile, skill_list)}
+    from_profile = {s.lower() for s in profile.get("skills", [])}
+    matched = [s for s in req["skills"] if s.lower() in have]
+    missing = [s for s in req["skills"] if s.lower() not in have]
 
     skill_ratio = len(matched) / len(req["skills"]) if req["skills"] else 0.0
     if text_score is None:
@@ -247,6 +276,9 @@ def score_match(profile, job, skill_list=None, text_score=None):
         "score": round(score, 1),
         "breakdown": {
             "matched_skills": matched,
+            # matched only because the skill appears in the resume text
+            # (coursework, projects, ...), not in Agent 1's skill list
+            "matched_from_text": [s for s in matched if s.lower() not in from_profile],
             "missing_skills": missing,
             "skill_points": round(skill_points, 1),
             "text_similarity": round(text_score["similarity"], 3),
@@ -376,8 +408,19 @@ def candidate_summary(profile, today=None):
     return "\n".join(lines)
 
 
+def requirement_gaps(req, breakdown):
+    # Years and degree gaps, in words (used by every key-point method)
+    gaps = []
+    if breakdown["experience_penalty"] > 0:
+        gaps.append(f"{req['min_years']}+ years of experience "
+                    f"(candidate has {breakdown['candidate_years']})")
+    if breakdown.get("degree_penalty", 0) > 0:
+        gaps.append(f"{req['degree']}'s degree")
+    return gaps
+
+
 def rule_based_assessment(job, breakdown, req):
-    """Fallback when the LLM is unavailable: the same fields, built from the
+    """Fallback when no model is available: the same fields, built from the
     rule-based requirements and the one-line reason."""
     key_points = []
     if req["skills"]:
@@ -386,12 +429,7 @@ def rule_based_assessment(job, breakdown, req):
         key_points.append(f"Experience: {req['min_years']}+ years")
     if req["degree"]:
         key_points.append(f"Degree: {req['degree']}'s")
-    gaps = list(breakdown["missing_skills"])
-    if breakdown["experience_penalty"] > 0:
-        gaps.append(f"{req['min_years']}+ years of experience "
-                    f"(candidate has {breakdown['candidate_years']})")
-    if breakdown.get("degree_penalty", 0) > 0:
-        gaps.append(f"{req['degree']}'s degree")
+    gaps = list(breakdown["missing_skills"]) + requirement_gaps(req, breakdown)
     # Ask about the job's skills: missing ones first (to probe the gap),
     # then matched ones (to check the claim)
     focus = (breakdown["missing_skills"] + breakdown["matched_skills"])[:5]
@@ -402,11 +440,215 @@ def rule_based_assessment(job, breakdown, req):
         "fit_summary": make_reason(breakdown),
         "gaps": gaps,
         "interview_focus": focus or [f"General fit for the {job['title']} role"],
+        "key_point_matches": [],
     }
 
 
-def assess_job(profile, job, result, skill_list=None, config=None):
-    """Key points for one job. Returns (assessment dict, "llm" or "rules").
+# ---------- Embedding key points (default) ----------
+
+# A sentence with one of these words lists optional skills ("C++ is a plus")
+NICE_TO_HAVE_CUES = r"\b(?:plus|bonus|preferred|nice to have|nice-to-have|desired|desirable|ideally)\b"
+MAX_FOCUS = 5
+
+
+def nice_to_have_skills(description, skills):
+    """The posting's skills that appear in a 'plus / bonus / preferred' sentence."""
+    nice = []
+    for sentence in re.split(r"(?<=[.!?])\s+", description):
+        if re.search(NICE_TO_HAVE_CUES, sentence, re.IGNORECASE):
+            nice += [s for s in extract_skills(sentence, skills) if s not in nice]
+    return nice
+
+
+# Words that start a degree / field-of-study clause: "Bachelor's degree in X",
+# "students studying X", "majoring in X"
+DEGREE_CLAUSE = (r"\b(?:degree|bachelor'?s?|master'?s?|ph\.?d|doctorate|associate'?s?"
+                 r"|studying|majoring|major)\b")
+
+
+def sentence_with(phrase, text):
+    """The sentence of `text` that contains `phrase` (any case), and where."""
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        at = sentence.lower().find(phrase.lower())
+        if at >= 0:
+            return sentence, at
+    return "", -1
+
+
+def phrase_kind(phrase, description, skill_list):
+    """Is a key phrase something the candidate can lack, or does it just
+    describe the job? Checked in this order:
+      "skill"      it contains a skill from skills.txt ("Docker containers")
+      "degree"     it is a degree ("Bachelor"), or it comes after a degree
+                   word in its sentence ("Bachelor's degree in Computer Science")
+      "experience" it comes after "N years" in its sentence
+                   ("5+ years of professional backend experience")
+      "role"       anything else: what the role, team or company is like
+                   ("junior developer", "designers", "small business clients")
+    Only the first three can become gaps."""
+    if extract_skills(phrase, skill_list):
+        return "skill"
+    if extract_degree(phrase):
+        return "degree"
+    sentence, at = sentence_with(phrase, description)
+    before = sentence[:at].lower() if at >= 0 else ""
+    if re.search(DEGREE_CLAUSE, before):
+        return "degree"
+    if re.search(YEARS_PATTERN, before, re.IGNORECASE):
+        return "experience"
+    return "role"
+
+
+def coverage(match, kind, description, have, education, skill_list):
+    """Does the resume show this key phrase? Returns (covered, evidence).
+      skill:  every skill in the phrase is one of the candidate's skills (exact)
+      degree: a degree level ("Bachelor") -> the candidate's degree is at least
+              that level; a field ("Computer Science") -> it appears word for
+              word in the candidate's degree, or the posting accepts "a related
+              field" and the candidate has a degree
+      experience / role: the most similar resume line passes is_evidence()
+    Skills and degrees are facts, so similarity is never used for them: it
+    rated "Computer Science" vs. "Computer Engineering" (0.67) higher than a
+    true match ("Statistics" vs. "BS in Statistics", 0.61)."""
+    phrase = match["phrase"]
+    if kind == "skill":
+        needed = extract_skills(phrase, skill_list)
+        if all(s.lower() in have for s in needed):
+            return True, "skills: " + ", ".join(needed)
+        return False, None
+    if kind == "degree":
+        degree_text = education.get("degree") or ""
+        field = education.get("field") or ""
+        if field and field.lower() not in degree_text.lower():
+            degree_text = f"{degree_text} ({field})" if degree_text else field
+        level = extract_degree(phrase)
+        if level:
+            covered = degree_rank(extract_degree(degree_text)) >= degree_rank(level)
+            return covered, (degree_text if covered else None)
+        if re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", degree_text, re.IGNORECASE):
+            return True, degree_text
+        sentence, _ = sentence_with(phrase, description)
+        if degree_text and re.search(r"\brelated field", sentence, re.IGNORECASE):
+            return True, f"{degree_text} (the posting accepts a related field)"
+        return False, None
+    line = match.get("best_line")
+    if line and is_evidence(phrase, line, match["resume_similarity"]):
+        return True, line
+    return False, None
+
+
+KEY_POINTS = KEYPOINT_CONFIG["top_n"]   # key points shown per job
+SPARE_PHRASES = 4                       # extra KeyBERT phrases, used when duplicates are dropped
+
+
+def unique(items):
+    seen, out = set(), []
+    for item in items:
+        if item.lower() not in seen:
+            seen.add(item.lower())
+            out.append(item)
+    return out
+
+
+def embedding_assessment(job, breakdown, req, matches, skill_list=None, profile=None):
+    """Key points from KeyBERT phrases + embedding matches against the resume.
+    matches: from keypoints.match_phrases(). Same fields as the other methods,
+    plus "key_point_matches" (the evidence behind every key point, with its
+    "kind": skill / degree / experience / role)."""
+    if skill_list is None:
+        skill_list = load_skills(SKILLS_PATH)
+    profile = profile or {}
+    have = {s.lower() for s in candidate_skills(profile, skill_list)}
+    education = profile.get("education") or {}
+    checked = []
+    for m in matches:
+        kind = phrase_kind(m["phrase"], job["description"], skill_list)
+        covered, evidence = coverage(m, kind, job["description"], have, education, skill_list)
+        checked.append({"phrase": m["phrase"], "kind": kind, "relevance": m["relevance"],
+                        "resume_similarity": m["resume_similarity"],
+                        "covered": covered, "evidence": evidence})
+    nice = nice_to_have_skills(job["description"], req["skills"])
+    missing = [s for s in breakdown["missing_skills"] if s not in nice]
+    listed = {s.lower() for s in nice + missing}       # skills already reported elsewhere
+
+    def only_listed_skills(phrase):
+        # "GitHub", "Data Structures and Algorithms": nothing but skills that
+        # are already in nice_to_have or gaps
+        skills = extract_skills(phrase, skill_list)
+        if not skills or any(s.lower() not in listed for s in skills):
+            return False
+        rest = phrase
+        for s in skills:
+            rest = re.sub(re.escape(s), " ", rest, flags=re.IGNORECASE)
+        return not content_words(rest)
+
+    # NO DUPLICATES: each skill is in only one of key_points, nice_to_have, gaps
+    matches = [m for m in checked if not only_listed_skills(m["phrase"])][:KEY_POINTS]
+
+    # Gaps beyond the skill list. Role phrases are never gaps; skill phrases
+    # aren't either (their missing skills are already in gaps / nice_to_have);
+    # a degree level isn't repeated when the degree check already reports it.
+    degree_reported = breakdown.get("degree_penalty", 0) > 0
+    uncovered = [m["phrase"] for m in matches
+                 if not m["covered"] and (m["kind"] == "experience" or (
+                     m["kind"] == "degree" and not (degree_reported and extract_degree(m["phrase"]))))]
+    requirements = [m for m in matches if m["kind"] != "role"]
+    covered = [m for m in matches if m["covered"]]
+
+    # Interview: probe up to 3 gaps first, then ask for examples of what the
+    # resume claims, best-matching key points first
+    probes = [f"{x} (asked for, not on the resume)" for x in missing + uncovered][:3]
+    checks = [f"{m['phrase']} (ask for an example; resume: {m['evidence']})"
+              for m in covered if m["kind"] != "degree"]      # no "example" of a degree
+    focus = (probes + checks)[:MAX_FOCUS]
+
+    reason = make_reason(breakdown)
+    shown = sum(m["covered"] for m in requirements)
+    summary = (f"{reason} The resume shows {shown} of the {len(requirements)} requirements "
+               "among the key points.") if requirements else reason
+    return {
+        "key_points": [m["phrase"] for m in matches]
+                      or ["No specific requirements found in the posting"],
+        "required_skills": [s for s in req["skills"] if s not in nice],
+        "nice_to_have": nice,
+        "fit_summary": summary,
+        "gaps": unique(missing + uncovered + requirement_gaps(req, breakdown)),
+        "interview_focus": focus or [f"General fit for the {job['title']} role"],
+        "key_point_matches": matches,
+    }
+
+
+class KeyPointer:
+    """Makes key points for one resume across many jobs. The resume lines
+    are embedded once. If the embedding model fails once, every later job
+    goes straight to the rule-based version (one warning, not one per job)."""
+
+    def __init__(self, profile, skill_list):
+        self.profile, self.skill_list = profile, skill_list
+        self.skills = candidate_skills(profile, skill_list)
+        self.lines, self.line_vectors, self.broken = None, None, False
+
+    def assess(self, job, breakdown):
+        req = extract_requirements(job, self.skill_list)
+        if not self.broken:
+            try:
+                phrases = extract_keyphrases(job["description"], KEY_POINTS + SPARE_PHRASES)
+                if self.lines is None:
+                    self.lines = resume_lines(resume_text(self.profile))
+                    self.line_vectors = embed(self.lines) if self.lines else None
+                matches = match_phrases(phrases, self.lines, self.line_vectors)
+                return (embedding_assessment(job, breakdown, req, matches, self.skill_list,
+                                             self.profile), "embeddings")
+            except EmbeddingError as e:
+                self.broken = True
+                print(f"[Agent 3] Embedding key points unavailable ({e}); using rules.",
+                      file=sys.stderr)
+        return rule_based_assessment(job, breakdown, req), "rules"
+
+
+def assess_job(profile, job, result, skill_list=None, config=None, fallback=None):
+    """OPTIONAL LLM key points for one job. Returns (assessment, "llm"), or,
+    if the LLM fails, fallback() (or the rule-based version) instead.
     The LLM only explains; it never changes result["score"]."""
     config = config or LLM_CONFIG
     b = result["breakdown"]
@@ -417,26 +659,33 @@ def assess_job(profile, job, result, skill_list=None, config=None):
         title=job["title"], company=job["company"], description=job["description"],
         candidate=candidate_summary(profile))
     try:
-        return ask_llm(prompt, config["provider"], config["model"], schema=JobAssessment), "llm"
+        assessment = ask_llm(prompt, config["provider"], config["model"], schema=JobAssessment)
+        return dict(assessment, key_point_matches=[]), "llm"
     except LLMError as e:
-        print(f"[Agent 3] LLM key points failed for {job['id']} ({e}); using rules.", file=sys.stderr)
+        print(f"[Agent 3] LLM key points failed for {job['id']} ({e}); using fallback.",
+              file=sys.stderr)
+        if fallback:
+            return fallback()
         req = extract_requirements(job, skill_list)
         return rule_based_assessment(job, b, req), "rules"
 
 
-def rank_jobs(profile, jobs, use_llm=True, top_n=None):
+def rank_jobs(profile, jobs, use_llm=False, top_n=None):
     """Scores every job for this profile and returns them best-first.
     Each result keeps the job's fields and adds score, matched_skills,
     missing_skills, reason, the full breakdown, the key-point "assessment",
-    and "assessed_by" ("llm" or "rules").
+    and "assessed_by" ("embeddings", "rules" or "llm").
 
-    Only the top_n best-scoring jobs (default LLM_CONFIG["top_n"]) get LLM
-    key points; the others get the rule-based version.
-    use_llm=False skips the LLM for every job.
+    Default: embedding key points (KeyBERT) for every job; rules if the
+    embedding model is unavailable. No LLM.
+    use_llm=True (optional): the top_n best-scoring jobs (default
+    LLM_CONFIG["top_n"]) get Groq key points instead; if Groq fails, they
+    fall back to the embedding version.
     """
     if top_n is None:
         top_n = LLM_CONFIG.get("top_n", 5)
     skill_list = load_skills(SKILLS_PATH)      # load once, not once per job
+    pointer = KeyPointer(profile, skill_list)
 
     # 1) Score every job, then sort, so we know which jobs are the top N
     scored = []
@@ -444,15 +693,16 @@ def rank_jobs(profile, jobs, use_llm=True, top_n=None):
         scored.append((job, score_match(profile, job, skill_list, text_score=text_score)))
     scored.sort(key=lambda pair: pair[1]["score"], reverse=True)
 
-    # 2) Key points: LLM for the top N, rules for the rest
+    # 2) Key points: embeddings for every job (or, optionally, Groq for the top N)
     ranked = []
     for position, (job, result) in enumerate(scored):
         b = result["breakdown"]
         if use_llm and position < top_n:
-            assessment, assessed_by = assess_job(profile, job, result, skill_list)
+            assessment, assessed_by = assess_job(
+                profile, job, result, skill_list,
+                fallback=lambda job=job, b=b: pointer.assess(job, b))
         else:
-            req = extract_requirements(job, skill_list)
-            assessment, assessed_by = rule_based_assessment(job, b, req), "rules"
+            assessment, assessed_by = pointer.assess(job, b)
         ranked.append({
             "id": job["id"],
             "title": job["title"],
@@ -501,16 +751,18 @@ def save_json(data, out_path):
 
 
 if __name__ == "__main__":
-    # python agents/job_synthesizer.py [resume] [jobs.json] [--rules]
-    from resume_parser import parse_resume, parse_resume_llm
+    # python agents/job_synthesizer.py [resume] [jobs.json] [--rules] [--llm]
+    #   --rules: rule-based resume parser instead of the NER model
+    #   --llm:   optional Groq key points for the top jobs (needs GROQ_API_KEY)
+    from resume_parser import parse_resume, parse_resume_ner
 
-    use_llm = "--rules" not in sys.argv
-    args = [a for a in sys.argv[1:] if a != "--rules"]
+    use_llm = "--llm" in sys.argv
+    args = [a for a in sys.argv[1:] if a not in ("--rules", "--llm")]
     resume_path = args[0] if len(args) > 0 else os.path.join(ROOT, "data", "sample.pdf")
     jobs_path = args[1] if len(args) > 1 else os.path.join(ROOT, "tests", "fixtures", "jobs.json")
     out_path = os.path.join(ROOT, "output", "ranked_jobs.json")
 
-    parse = parse_resume_llm if use_llm else parse_resume
+    parse = parse_resume if "--rules" in sys.argv else parse_resume_ner
     profile = parse(resume_path, skills_path=SKILLS_PATH)
     ranked = rank_jobs(profile, load_jobs(jobs_path), use_llm=use_llm)
     print(f"Resume parsed by: {profile['parsed_by']}\n")

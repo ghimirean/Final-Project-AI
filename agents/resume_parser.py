@@ -1,11 +1,15 @@
-"""Agent 1: Resume Parser.
+"""Agent 1: Resume Parser, an NLP named-entity-recognition (NER) agent.
 
-parse_resume_llm(path)  LLM agent (default): Gemini reads the resume and
-                        returns the profile; falls back to the rules below
-                        if the LLM fails or returns bad output.
-parse_resume(path)      Rule-based parser (regex + keyword list).
-Both return the same profile format, with "parsed_by": "llm" or "rules".
+parse_resume_ner(path)  DEFAULT. A spaCy NER model, fine-tuned on annotated
+                        resumes (scripts/train_ner.py), finds PERSON, ORG,
+                        DEGREE, JOB_TITLE, SKILL and DATE entities, and Python
+                        assembles them into the profile. Falls back to the
+                        rule-based parser if the model can't be loaded.
+parse_resume_llm(path)  Alternative: Gemini reads the resume (kept for comparison).
+parse_resume(path)      Rule-based parser (regex + keyword list), the fallback.
+All return the same profile format, with "parsed_by": "ner", "llm" or "rules".
 """
+import bisect
 from datetime import date
 from typing import List, Optional
 import re
@@ -18,7 +22,11 @@ from pydantic import BaseModel, Field
 
 from llm import ask_llm, LLMError
 
-# Agent 1's model. Change this one line to switch provider or model.
+# Agent 1's NER model (built by scripts/train_ner.py). Change this line to use another.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+NER_CONFIG = {"model_path": os.path.join(ROOT, "models", "resume_ner")}
+
+# Model for the alternative LLM parser. Change this one line to switch provider or model.
 LLM_CONFIG = {"provider": "gemini", "model": "gemini-3.5-flash"}
 
 
@@ -109,18 +117,83 @@ URL_PATTERN = (r"(?:\b[A-Za-z]+:\s*)?"
 def remove_urls(text):
     return re.sub(URL_PATTERN, " ", text, flags=re.IGNORECASE)
 
+SKILL_ALIASES_PATH = os.path.join(ROOT, "data", "skill_aliases.txt")
+_aliases = None
+
+
+def skill_aliases():
+    """{alias as written: canonical name} from data/skill_aliases.txt.
+    The spelling is kept, because short aliases ("ML") match exact case."""
+    global _aliases
+    if _aliases is None:
+        _aliases = {}
+        if os.path.exists(SKILL_ALIASES_PATH):
+            with open(SKILL_ALIASES_PATH, encoding="utf-8") as f:
+                for line in f:
+                    if "=" in line and not line.lstrip().startswith("#"):
+                        alias, canonical = (p.strip() for p in line.split("=", 1))
+                        _aliases[alias] = canonical
+    return _aliases
+
+
+def canonical_skill(name):
+    # "Microsoft Excel" -> "Excel", "Object-Oriented Programming" -> "OOP"
+    lookup = {alias.lower(): canonical for alias, canonical in skill_aliases().items()}
+    return lookup.get(name.lower(), name)
+
+
+def _skill_found(name, text):
+    # Match as a whole word, so "Java" doesn't match "JavaScript".
+    # Short names like "C", "R" or "ML" must match exact case.
+    pattern = r"(?<![\w+#])" + re.escape(name) + r"(?![\w+#])"
+    return re.search(pattern, text, 0 if len(name) <= 2 else re.IGNORECASE)
+
+
 def extract_skills(text, skill_list):
+    """Skills from skill_list found in the text, by canonical name
+    ("MS Excel" -> "Excel"), each once. A skill's aliases count as the skill."""
     # Drop links first so "github.com/me" doesn't count as the skill "GitHub"
     text = remove_urls(text)
+    aliases = skill_aliases()
     found = []
     for skill in skill_list:
-        # Match the skill as a whole word, so "Java" doesn't match "JavaScript"
-        pattern = r"(?<![\w+#])" + re.escape(skill) + r"(?![\w+#])"
-        # Short skills like "C" or "R" must match exact case
-        flags = 0 if len(skill) <= 2 else re.IGNORECASE
-        if re.search(pattern, text, flags):
-            found.append(skill)
+        canonical = canonical_skill(skill)
+        if canonical in found:
+            continue
+        names = [skill] + [a for a, c in aliases.items() if c == canonical]
+        if any(_skill_found(name, text) for name in names):
+            found.append(canonical)
     return found
+
+
+# PLANNED / FUTURE WORK is not a skill yet: "documented a future roadmap for
+# GUI development", "plan to learn Docker", "currently learning Python".
+# From one of these words to the end of the sentence/line is "future" text.
+# "learning" right after machine/deep/... is a skill name, not a plan.
+FUTURE_CUE = (r"\b(?:future|roadmap|plan(?:s|ned|ning)?(?:\s+to)?|to\s+learn|will\s+learn"
+              r"|(?<!machine\s)(?<!deep\s)(?<!reinforcement\s)(?<!supervised\s)"
+              r"(?<!transfer\s)(?<!e-)learning)\b")
+
+
+def future_spans(text):
+    """(start, end) character ranges of text about planned or future work."""
+    spans = []
+    for m in re.finditer(FUTURE_CUE, text, re.IGNORECASE):
+        end = re.search(r"[.;!?\n]", text[m.end():])
+        spans.append((m.start(), m.end() + end.start() if end else len(text)))
+    return spans
+
+
+def in_spans(position, spans):
+    return any(s <= position < e for s, e in spans)
+
+
+def resume_skills_in_text(text, skill_list):
+    """extract_skills() for a RESUME: skills mentioned only as planned or
+    future work don't count (that text is blanked out first)."""
+    for s, e in future_spans(text):
+        text = text[:s] + " " * (e - s) + text[e:]
+    return extract_skills(text, skill_list)
 
 
 def get_section(sections, keyword):
@@ -137,7 +210,8 @@ def extract_education(lines):
     degree = next((l for l in lines
                    if re.search(r"\b(Bachelor|Master|Associate|Doctor|Ph\.?D|B\.S|M\.S|B\.A|M\.A|MBA)\b", l)), None)
     field = degree.split(" in ", 1)[1].strip() if degree and " in " in degree else None
-    graduation = find(r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.? \d{4}", text)
+    graduation = find(r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.? \d{4}"
+                      r"|(Spring|Summer|Fall|Autumn|Winter) \d{4}", text)
     return {
         "institution": institution,
         "degree": degree,
@@ -146,9 +220,13 @@ def extract_education(lines):
     }
 
 MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-          "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
-# One date can be "Aug 2024", "08/2024", or just "2024"
+          "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+          # Academic seasons ("Fall 2023"): each is one fixed month, so
+          # "Fall 2023 - Spring 2024" = Sep 2023 - Jan 2024 = 5 months
+          "spr": 1, "sum": 6, "fal": 9, "aut": 9, "win": 12}
+# One date can be "Aug 2024", "Fall 2023", "08/2024", or just "2024"
 DATE = (r"(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4}"
+        r"|(?:Spring|Summer|Fall|Autumn|Winter)\s+\d{4}"
         r"|\d{1,2}/\d{4}|\d{4})")
 DATE_RANGE = (r"\b(" + DATE + r")\s*(?:[–—-]|to)\s*(" + DATE
               + r"|Present|Current|Now)\b")
@@ -215,7 +293,7 @@ def extract_projects(lines, skill_list):
     def finish():
         if projects:
             projects[-1]["summary"] = bullets[0] if bullets else None
-            projects[-1]["skills"] = extract_skills("\n".join(body), skill_list)
+            projects[-1]["skills"] = resume_skills_in_text("\n".join(body), skill_list)
 
     for i, line in enumerate(lines):
         if is_project_header(lines, i):
@@ -247,7 +325,8 @@ def parse_resume(path, skills_path="data/skills.txt"):
     sections = split_sections(text)
     profile = extract_contact(sections.get("HEADER", []))
     skill_list = load_skills(skills_path)
-    profile["skills"] = extract_skills(text, skill_list)
+    profile["skills"] = resume_skills_in_text(text, skill_list)
+    profile["skill_sources"] = {s: "rules" for s in profile["skills"]}
     profile["education"] = extract_education(get_section(sections, "EDUCATION"))
     jobs, years = extract_experience(get_section(sections, "EXPERIENCE"))
     profile["experience"] = jobs
@@ -358,7 +437,8 @@ def build_profile_from_llm(data, text, skill_list):
     def clean_skills(names):
         cleaned = []
         for s in names:
-            s = canonical.get(s.strip().lower(), s.strip())   # "python" -> "Python"
+            s = canonical_skill(s.strip())                     # "MS Excel" -> "Excel"
+            s = canonical.get(s.lower(), s)                    # "python" -> "Python"
             if s and s not in cleaned:
                 cleaned.append(s)
         return cleaned
@@ -383,6 +463,7 @@ def build_profile_from_llm(data, text, skill_list):
         "linkedin": clean_link(data["linkedin"]),
         "github": clean_link(data["github"]),
         "skills": skills,
+        "skill_sources": {s: "llm" for s in skills},
         "education": data["education"],
         "experience": jobs,
         "experience_years": round(sum(j["months"] for j in jobs) / 12, 1),
@@ -407,6 +488,254 @@ def parse_resume_llm(path, skills_path="data/skills.txt", config=None):
         print(f"[Agent 1] LLM parsing failed ({e}); using rule-based parser.", file=sys.stderr)
         return parse_resume(path, skills_path)
 
+# ---------- NER version (default) ----------
+
+class NERUnavailable(Exception):
+    """The NER model can't be loaded (not trained yet, spaCy missing, ...)."""
+
+
+_ner_model = None      # loaded once, then reused
+
+
+def _load_ner_model():
+    # The only function that loads the model. Tests replace it with a fake.
+    global _ner_model
+    if _ner_model is None:
+        model_path = NER_CONFIG["model_path"]
+        if not os.path.isdir(model_path):
+            raise NERUnavailable(f"model folder not found: {model_path} "
+                                 "(it is committed in git; or rebuild it with python scripts/train_ner.py)")
+        try:
+            import spacy
+        except ImportError:
+            raise NERUnavailable("spaCy is not installed (run: pip install -r requirements.txt)") from None
+        try:
+            _ner_model = spacy.load(model_path)
+        except Exception as e:
+            raise NERUnavailable(f"spaCy could not load {model_path}: {type(e).__name__}: {e}") from None
+    return _ner_model
+
+
+def _warn_fallback(reason):
+    print("=" * 70 + "\n"
+          f"WARNING [Agent 1]: the NER model could not be used.\n"
+          f"  Reason: {reason}\n"
+          f"  Falling back to the RULE-BASED parser (profile will say parsed_by=\"rules\").\n"
+          + "=" * 70, file=sys.stderr)
+
+
+def ner_entities(nlp, text):
+    """Runs the model and returns its entities as simple dicts, each with
+    the line number it's on (layout is used to group them into jobs)."""
+    line_starts = [0] + [i + 1 for i, ch in enumerate(text) if ch == "\n"]
+    return [{"label": ent.label_, "text": ent.text.strip(), "start": ent.start_char,
+             "end": ent.end_char, "line": bisect.bisect_right(line_starts, ent.start_char) - 1}
+            for ent in nlp(text).ents]
+
+
+def parse_date(token, is_end=False):
+    # Month count for a DATE entity, or None if it isn't a real date
+    # (the model sometimes tags words like "weekly" or "three years" as DATE)
+    try:
+        return to_months(token, is_end=is_end)
+    except (ValueError, KeyError, IndexError):
+        return None
+
+
+# Sections whose titles are not jobs (project roles, club roles, awards)
+NON_JOB_SECTIONS = ["PROJECT", "LEADERSHIP", "ACTIVITIES", "ACHIEVEMENTS", "AWARDS",
+                    "CERTIFICATIONS"]
+
+
+def non_job_lines(text):
+    # Line numbers inside sections where a JOB_TITLE entity can't be a real job
+    lines, inside = set(), False
+    for i, line in enumerate(text.split("\n")):
+        if is_heading(line.strip()):
+            inside = any(k in line.upper() for k in NON_JOB_SECTIONS)
+        elif inside:
+            lines.add(i)
+    return lines
+
+
+# Words that mark an organisation, not a person ("Web Studio", "Eastvale University")
+ORG_WORDS = {
+    "inc", "llc", "ltd", "corp", "corporation", "company", "co", "group", "studio", "studios",
+    "labs", "lab", "systems", "solutions", "technologies", "tech", "media", "logistics",
+    "university", "college", "institute", "school", "academy", "bank", "bookshop", "store",
+    "shop", "cafe", "diner", "restaurant", "bakery", "club", "department", "agency",
+    "consulting", "services", "partners", "foundation", "association", "hospital", "clinic",
+    "center", "centre", "robotics", "analytics", "software", "library",
+}
+NOT_NAMES = {"resume", "résumé", "curriculum", "vitae", "cv", "profile", "contact"}
+NAME_WORD = r"[A-Z][a-zA-Z'’.]*(?:-[A-Z][a-zA-Z'’.]*)*"     # Ann, O'Neil, Mei-Ling, Okafor-Bell
+
+
+def looks_like_org(text):
+    return any(w.lower().strip(".,") in ORG_WORDS for w in text.split())
+
+
+def looks_like_name(line):
+    """2-4 capitalised words, no digits, @, |, commas or colons: "Mei-Ling
+    Castellanos", "ANN LEE". Not an organisation, not "Curriculum Vitae"."""
+    words = line.split()
+    if not 2 <= len(words) <= 4 or re.search(r"[\d@|,:]", line):
+        return False
+    if looks_like_org(line) or any(w.lower() in NOT_NAMES for w in words):
+        return False
+    return all(re.fullmatch(NAME_WORD, w.title() if w.isupper() else w) for w in words)
+
+
+def choose_name(persons, text):
+    """The candidate's name. NER's first PERSON, unless it is missing, looks
+    like an organisation, or is only part of the first line (a hyphenated
+    name cut in two): then the resume's first non-empty line, if that looks
+    like a name. An organisation is never returned as a name."""
+    first_line = next((line.strip() for line in text.split("\n") if line.strip()), "")
+    name = persons[0]["text"] if persons else None
+    first_is_name = looks_like_name(first_line)
+    if first_is_name and (name is None or looks_like_org(name)
+                          or (name != first_line and name in first_line)):
+        name = first_line
+    elif name is not None and looks_like_org(name):
+        name = None
+    return name.title() if name and name.isupper() else name
+
+
+def company_from_line(line, title):
+    """Rule-based fallback when NER finds a job title but no company.
+    Returns (company, title). The title's line is split exactly like the
+    rule-based parser does: "Company | Title" (dates removed). The model
+    misses some names it never saw ("Chick-fil-A | Team Member (Cashier)"),
+    and sometimes tags BOTH halves as titles ("Quillstone Media | Web
+    Developer"), so the split decides both fields, as long as the NER title
+    is one of the two parts. Otherwise: (None, NER title)."""
+    parts = []
+    for part in line.split("|"):
+        part = re.sub(DATE_RANGE, "", part, flags=re.IGNORECASE)
+        part = re.sub(DATE, "", part, flags=re.IGNORECASE).strip(" ,–—-\t")
+        if part:
+            parts.append(part)
+    if len(parts) >= 2 and any(title.lower() in p.lower() for p in parts[:2]):
+        return parts[0], parts[1]
+    return None, title
+
+
+def build_profile_from_ner(ents, text, skill_list):
+    """Turns NER entities into the exact parse_resume() format.
+    The model finds the pieces; layout groups them; Python does the math."""
+    by_label = lambda label: [e for e in ents if e["label"] == label]
+
+    # Contact: name from NER; email/phone/links have fixed patterns, so regex
+    profile = extract_contact(text.split("\n"))
+    profile["name"] = choose_name(by_label("PERSON"), text)
+
+    # Skills, step 1 = ENTITY LINKING: each SKILL entity is linked to the
+    # canonical skills.txt names it contains ("Java Programming" -> Java,
+    # "Microsoft Excel" -> Excel, "Object-Oriented Programming" -> OOP).
+    # Entities that link to nothing ("Kushtia", a place) are dropped, and so
+    # are entities inside a link or in planned/future work.
+    # Step 2: every skills.txt skill found anywhere else in the text
+    # (coursework, projects) is added. skill_sources says which step found it.
+    links = [(m.start(), m.end()) for m in re.finditer(URL_PATTERN, text, re.IGNORECASE)]
+    future = future_spans(text)
+    sources = {}
+    for e in by_label("SKILL"):
+        if in_spans(e["start"], links) or in_spans(e["start"], future):
+            continue
+        for skill in extract_skills(e["text"], skill_list):
+            sources.setdefault(skill, "ner")
+    for skill in resume_skills_in_text(text, skill_list):
+        sources.setdefault(skill, "text")
+    skills = list(sources)
+
+    # Education: the first DEGREE, the school (ORG) from 2 lines above to 1
+    # line below it, and the first real date from 1 line above to 1 below
+    # (e.g. "School \n City, State May 2028 \n Degree")
+    education = {"institution": None, "degree": None, "field": None, "graduation": None}
+    education_lines = set()
+    degrees = by_label("DEGREE")
+    if degrees:
+        d = degrees[0]
+        education["degree"] = d["text"]
+        if " in " in d["text"]:
+            education["field"] = d["text"].split(" in ", 1)[1].strip()
+        near = lambda e, before, after: d["line"] - before <= e["line"] <= d["line"] + after
+        schools = [e for e in by_label("ORG") if near(e, 2, 1)]
+        schools.sort(key=lambda e: (not re.search(r"University|College|Institute|School", e["text"]),
+                                    abs(e["line"] - d["line"])))
+        if schools:
+            education["institution"] = schools[0]["text"]
+            education_lines.add(schools[0]["line"])
+        grad = [e for e in by_label("DATE") if near(e, 1, 1) and parse_date(e["text"]) is not None]
+        grad.sort(key=lambda e: (e["line"] < d["line"], e["start"]))   # prefer on/after the degree
+        if grad:
+            education["graduation"] = grad[0]["text"]
+            education_lines.add(grad[0]["line"])
+        education_lines.add(d["line"])
+
+    # Jobs: one per line that has a JOB_TITLE (not in Education or a
+    # Projects/Leadership/Awards-type section).
+    # Company = ORG on the same line, else the line above/below.
+    # Dates = the first two real dates from the title's line to 2 lines below.
+    skip = non_job_lines(text) | education_lines
+    text_lines = text.split("\n")
+    title_lines = sorted({e["line"] for e in by_label("JOB_TITLE") if e["line"] not in skip})
+    used_orgs, jobs = set(), []
+    for n, line in enumerate(title_lines):
+        title = next(e for e in by_label("JOB_TITLE") if e["line"] == line)
+        next_title = title_lines[n + 1] if n + 1 < len(title_lines) else float("inf")
+        orgs = [e for e in by_label("ORG") if abs(e["line"] - line) <= 1
+                and e["line"] not in education_lines and e["start"] not in used_orgs
+                and (e["line"] <= line or e["line"] < next_title)]
+        orgs.sort(key=lambda e: abs(e["line"] - line))
+        company = orgs[0] if orgs else None
+        if company:
+            used_orgs.add(company["start"])
+        dates = [e for e in by_label("DATE") if line <= e["line"] <= line + 2
+                 and e["line"] < next_title and parse_date(e["text"]) is not None]
+        if company:
+            company_name, title_name = company["text"], title["text"]
+        else:
+            company_name, title_name = company_from_line(text_lines[line], title["text"])
+        job = {"company": company_name, "title": title_name, "dates": None, "months": 0}
+        if len(dates) >= 2:
+            start, end = parse_date(dates[0]["text"]), parse_date(dates[1]["text"], is_end=True)
+            if end >= start:
+                job["dates"] = text[dates[0]["start"]:dates[1]["end"]]
+                job["months"] = end - start + 1
+        jobs.append(job)
+
+    profile["skills"] = skills
+    profile["skill_sources"] = sources
+    profile["education"] = education
+    profile["experience"] = jobs
+    profile["experience_years"] = round(sum(j["months"] for j in jobs) / 12, 1)
+    # Projects aren't an NER label, so the rule-based project reader is reused
+    profile["projects"] = extract_projects(get_section(split_sections(text), "PROJECT"), skill_list)
+    profile["parsed_by"] = "ner"
+    profile["raw_text"] = text
+    return profile
+
+
+def parse_resume_ner(path, skills_path="data/skills.txt"):
+    """NER-based Agent 1 (default). Same output format as parse_resume().
+    If the model can't be loaded or fails, falls back to the rule-based
+    parser (parsed_by = "rules")."""
+    text = read_resume(path)
+    try:
+        nlp = _load_ner_model()
+    except NERUnavailable as e:                    # model missing or can't load
+        _warn_fallback(e)
+        return parse_resume(path, skills_path)
+    try:
+        ents = ner_entities(nlp, text)
+    except Exception as e:                         # model loaded but crashed
+        _warn_fallback(f"the model crashed while reading the resume: {type(e).__name__}: {e}")
+        return parse_resume(path, skills_path)
+    return build_profile_from_ner(ents, text, load_skills(skills_path))
+
+
 def save_profile(profile, out_path="output/profile.json"):
     # Creates the output folder if needed; ensure_ascii=False keeps
     # characters like "é" readable instead of "é"
@@ -416,10 +745,15 @@ def save_profile(profile, out_path="output/profile.json"):
 
 
 if __name__ == "__main__":
-    # python agents/resume_parser.py [resume path] [--rules]
-    args = [a for a in sys.argv[1:] if a != "--rules"]
+    # python agents/resume_parser.py [resume path] [--rules | --llm]   (default: NER)
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
     path = args[0] if args else "data/sample.pdf"
-    profile = parse_resume(path) if "--rules" in sys.argv else parse_resume_llm(path)
+    if "--rules" in sys.argv:
+        profile = parse_resume(path)
+    elif "--llm" in sys.argv:
+        profile = parse_resume_llm(path)
+    else:
+        profile = parse_resume_ner(path)
     save_profile(profile)
     # raw_text is saved to the file but left out of the printout to keep it readable
     printable = {k: v for k, v in profile.items() if k != "raw_text"}

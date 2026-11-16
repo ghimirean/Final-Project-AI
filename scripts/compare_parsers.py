@@ -1,10 +1,15 @@
-"""Compares Agent 1's LLM parser with the rule-based parser.
+"""Compares Agent 1's three parsers: NER (default), Gemini LLM, and rules.
 
-Run from project root (makes real Gemini calls, one per resume):
+Run from project root:
     python scripts/compare_parsers.py                       # fixtures + data/sample.pdf
     python scripts/compare_parsers.py path/to/resume.pdf    # specific files
 
-Prints only the fields that differ. Nothing is saved to disk.
+Needs the trained NER model (python scripts/train_ner.py) and GEMINI_API_KEY
+in .env; one Gemini call per resume. If either is missing, that parser
+falls back to rules and the "parsed_by" line says so.
+
+For each resume, prints only the fields where the parsers disagree, then
+a summary of how often each pair agrees. Nothing is saved to disk.
 """
 import os
 import sys
@@ -12,7 +17,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "agents"))
 
-from resume_parser import parse_resume, parse_resume_llm  # noqa: E402
+from resume_parser import parse_resume, parse_resume_llm, parse_resume_ner  # noqa: E402
 
 SKILLS = os.path.join(ROOT, "data", "skills.txt")
 DEFAULT_FILES = [
@@ -21,75 +26,57 @@ DEFAULT_FILES = [
     "tests/fixtures/resume_comma_skills.docx",
     "data/sample.pdf",
 ]
+PARSERS = [("rules", parse_resume), ("ner", parse_resume_ner), ("llm", parse_resume_llm)]
 
 
-def compare(path):
-    rules = parse_resume(path, skills_path=SKILLS)
-    llm = parse_resume_llm(path, skills_path=SKILLS)
-    print(f"\n=== {os.path.basename(path)}  (LLM result parsed_by = {llm['parsed_by']})")
-    if llm["parsed_by"] != "llm":
-        print("  LLM failed, so both results come from the rules. Nothing to compare.")
-        return 0
+def fields(profile):
+    """The comparable view of a profile. Skills are sorted (order doesn't
+    matter), and project summaries are left out (the LLM writes its own)."""
+    edu = profile["education"]
+    return {
+        "name": profile["name"],
+        "email": profile["email"],
+        "phone": profile["phone"],
+        "skills": ", ".join(sorted(profile["skills"])),
+        "education": f"{edu['institution']} | {edu['degree']} | {edu['graduation']}",
+        "jobs": "; ".join(f"{j['company']} | {j['title']} | {j['months']} mo"
+                          for j in profile["experience"]),
+        "years": profile["experience_years"],
+        "projects": "; ".join(f"{p['name']} | {p['role']} | {p['date']}" for p in profile["projects"]),
+    }
 
+
+def compare(path, agreement):
+    results = {name: parse(path, skills_path=SKILLS) for name, parse in PARSERS}
+    sources = ", ".join(f"{name} -> parsed_by={r['parsed_by']}" for name, r in results.items())
+    print(f"\n=== {os.path.basename(path)}   ({sources})")
+    views = {name: fields(r) for name, r in results.items()}
     differences = 0
-    for key in ["name", "email", "phone", "linkedin", "github", "experience_years"]:
-        if rules[key] != llm[key]:
-            print(f"  {key:<17} rules: {rules[key]!r:<35} llm: {llm[key]!r}")
-            differences += 1
-
-    only_llm = [s for s in llm["skills"] if s not in rules["skills"]]
-    only_rules = [s for s in rules["skills"] if s not in llm["skills"]]
-    if only_llm or only_rules:
-        print(f"  skills            only LLM: {only_llm}")
-        print(f"                    only rules: {only_rules}")
+    for field in views["rules"]:
+        values = {name: views[name][field] for name in views}
+        for a, b in agreement:
+            agreement[(a, b)][0] += values[a] == values[b]
+            agreement[(a, b)][1] += 1
+        if len(set(map(str, values.values()))) == 1:
+            continue
         differences += 1
-
-    for field in ["institution", "degree", "field", "graduation"]:
-        a, b = rules["education"].get(field), llm["education"].get(field)
-        if a != b:
-            print(f"  education.{field:<7} rules: {a!r:<35} llm: {b!r}")
-            differences += 1
-
-    def job_line(j):
-        return f"{j['company']} | {j['title']} | {j['dates']} | {j['months']} mo"
-    rules_jobs = [job_line(j) for j in rules["experience"]]
-    llm_jobs = [job_line(j) for j in llm["experience"]]
-    if rules_jobs != llm_jobs:
-        print("  experience        rules:")
-        for line in rules_jobs:
-            print(f"                      {line}")
-        print("                    llm:")
-        for line in llm_jobs:
-            print(f"                      {line}")
-        differences += 1
-
-    def project_line(p):
-        # Skills are sorted so a different order doesn't count as a difference
-        return f"{p['name']} | {p['role']} | {p['date']} | skills: {', '.join(sorted(p['skills']))}"
-    rules_projects = [project_line(p) for p in rules["projects"]]
-    llm_projects = [project_line(p) for p in llm["projects"]]
-    if rules_projects != llm_projects:
-        print("  projects          rules:")
-        for line in rules_projects:
-            print(f"                      {line}")
-        print("                    llm:")
-        for line in llm_projects:
-            print(f"                      {line}")
-        differences += 1
-    # Summaries are free text (the LLM writes its own sentence), so they are
-    # shown for reading, not counted as a difference
-    for r, l in zip(rules["projects"], llm["projects"]):
-        if r["summary"] != l["summary"]:
-            print(f"  summary of '{l['name']}':")
-            print(f"                      rules: {r['summary']}")
-            print(f"                      llm:   {l['summary']}")
-
+        print(f"  {field}:")
+        for name, value in values.items():
+            note = ""
+            if field == "skills":
+                others = set().union(*(set(views[o]["skills"].split(", ")) for o in views if o != name))
+                extra = sorted(set(str(value).split(", ")) - others - {""})
+                note = f"   (only {name}: {', '.join(extra)})" if extra else ""
+            print(f"    {name:<6} {value}{note}")
     if differences == 0:
-        print("  identical (apart from any summaries shown above)")
-    return differences
+        print("  all three parsers agree on every field")
 
 
 if __name__ == "__main__":
     files = sys.argv[1:] or [f for f in DEFAULT_FILES if os.path.exists(os.path.join(ROOT, f))]
+    agreement = {pair: [0, 0] for pair in [("rules", "ner"), ("rules", "llm"), ("ner", "llm")]}
     for f in files:
-        compare(os.path.join(ROOT, f) if not os.path.isabs(f) else f)
+        compare(os.path.join(ROOT, f) if not os.path.isabs(f) else f, agreement)
+    print("\nFields that agree (8 fields per resume):")
+    for (a, b), (same, total) in agreement.items():
+        print(f"  {a:>5} vs {b:<5} {same}/{total}")
