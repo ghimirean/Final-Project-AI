@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(ROOT, "agents"))
 from job_synthesizer import (  # noqa: E402
     load_jobs, extract_requirements, extract_min_years, extract_degree,
     score_match, job_similarities, rank_jobs, make_reason, resume_text,
-    assess_job, rule_based_assessment, candidate_summary, LLM_CONFIG,
+    assess_job, rule_based_assessment, candidate_summary, LLM_CONFIG, candidate_skills,
     graduation_status,
 )
 from datetime import date  # noqa: E402
@@ -53,6 +53,35 @@ def test_senior_job_needs_five_years():
     req = extract_requirements(JOBS["job-005"])
     assert req["min_years"] == 5
     assert "Java" in req["skills"] and "AWS" in req["skills"]
+
+
+# ---------- skills from the whole resume text ----------
+
+COURSEWORK = dict(STUDENT, skills=["Java", "C++", "Git", "OOP", "Data Structures"],
+                  raw_text="Relevant Coursework: Analysis of Algorithms, Operating Systems\n"
+                           "Project: chess engine in Java. github.com/someone/python-notes")
+
+
+def test_skills_in_coursework_count():
+    skills = candidate_skills(COURSEWORK)
+    assert skills[:5] == COURSEWORK["skills"]                # Agent 1's skills first, unchanged
+    assert "Algorithms" in skills                            # from "Analysis of Algorithms"
+    assert "Python" not in skills                            # links are ignored
+    assert skills.count("Java") == 1                         # no duplicates
+
+
+def test_coursework_skill_raises_score_and_is_explained():
+    without_text = score_match(dict(COURSEWORK, raw_text=""), JOBS["job-001"])
+    with_text = score_match(COURSEWORK, JOBS["job-001"])
+    assert with_text["score"] > without_text["score"]
+    assert "Algorithms" in with_text["breakdown"]["matched_skills"]
+    assert with_text["breakdown"]["matched_from_text"] == ["Algorithms"]
+    assert without_text["breakdown"]["matched_from_text"] == []
+
+
+def test_skill_matching_ignores_case():
+    result = score_match(dict(STUDENT, skills=["java"]), JOBS["job-001"])
+    assert "Java" in result["breakdown"]["matched_skills"]
 
 
 def test_ml_job_requirements():

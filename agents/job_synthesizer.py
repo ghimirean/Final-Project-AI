@@ -224,6 +224,23 @@ def text_scores(profile, jobs):
                 for r, s in zip(raw, scaled)]
 
 
+def candidate_skills(profile, skill_list=None):
+    """The candidate's skills for matching: Agent 1's skills, plus every
+    skill from skills.txt that appears anywhere in the resume text. Agent 1
+    (NER) only takes skills from skill-like places, so a skill mentioned only
+    in a course ("Analysis of Algorithms") or a project line would otherwise
+    be missed. Agent 1's own output is not changed."""
+    if skill_list is None:
+        skill_list = load_skills(SKILLS_PATH)
+    skills = list(profile.get("skills", []))
+    seen = {s.lower() for s in skills}
+    for skill in extract_skills(profile.get("raw_text") or "", skill_list):
+        if skill.lower() not in seen:
+            seen.add(skill.lower())
+            skills.append(skill)
+    return skills
+
+
 def score_match(profile, job, skill_list=None, text_score=None):
     """Scores how well a resume profile fits one job, from 0 to 100.
     Returns {"score": float, "breakdown": {...}} so the score can be explained.
@@ -233,9 +250,10 @@ def score_match(profile, job, skill_list=None, text_score=None):
     one job (with embeddings that gives the same points as inside a ranking).
     """
     req = extract_requirements(job, skill_list)
-    have = set(profile.get("skills", []))
-    matched = [s for s in req["skills"] if s in have]
-    missing = [s for s in req["skills"] if s not in have]
+    have = {s.lower() for s in candidate_skills(profile, skill_list)}
+    from_profile = {s.lower() for s in profile.get("skills", [])}
+    matched = [s for s in req["skills"] if s.lower() in have]
+    missing = [s for s in req["skills"] if s.lower() not in have]
 
     skill_ratio = len(matched) / len(req["skills"]) if req["skills"] else 0.0
     if text_score is None:
@@ -257,6 +275,9 @@ def score_match(profile, job, skill_list=None, text_score=None):
         "score": round(score, 1),
         "breakdown": {
             "matched_skills": matched,
+            # matched only because the skill appears in the resume text
+            # (coursework, projects, ...), not in Agent 1's skill list
+            "matched_from_text": [s for s in matched if s.lower() not in from_profile],
             "missing_skills": missing,
             "skill_points": round(skill_points, 1),
             "text_similarity": round(text_score["similarity"], 3),
@@ -481,6 +502,7 @@ class KeyPointer:
 
     def __init__(self, profile, skill_list):
         self.profile, self.skill_list = profile, skill_list
+        self.skills = candidate_skills(profile, skill_list)
         self.lines, self.line_vectors, self.broken = None, None, False
 
     def assess(self, job, breakdown):
@@ -491,8 +513,7 @@ class KeyPointer:
                 if self.lines is None:
                     self.lines = resume_lines(resume_text(self.profile))
                     self.line_vectors = embed(self.lines) if self.lines else None
-                matches = match_phrases(phrases, self.lines, self.profile.get("skills", []),
-                                        self.line_vectors)
+                matches = match_phrases(phrases, self.lines, self.skills, self.line_vectors)
                 return embedding_assessment(job, breakdown, req, matches), "embeddings"
             except EmbeddingError as e:
                 self.broken = True
