@@ -78,9 +78,20 @@ entities of given types. Ours recognizes six types:
 2. Run the trained model to get the entities.
 3. Assemble them by layout:
    - name = first `PERSON`
-   - skills = every `SKILL` outside a link, spelled like `skills.txt` when listed there; new skills are kept too
+   - skills, by **entity linking**: each `SKILL` entity is mapped to the
+     canonical `skills.txt` names it contains ("Java Programming" → Java,
+     "Microsoft Excel" → Excel, "Object-Oriented Programming" → OOP; other
+     spellings live in `data/skill_aliases.txt`). Entities that link to no
+     known skill ("Kushtia", a place) are dropped, and duplicates removed.
+     Then every `skills.txt` skill found anywhere else in the text
+     (coursework, projects) is added, so "Analysis of Algorithms" gives
+     Algorithms. `skill_sources` records `"ner"` or `"text"` for each skill.
+   - **planned work isn't a skill:** a skill that only appears after "future",
+     "roadmap", "plan(s/ned) to", "to learn" or "learning" in its sentence
+     ("documented a future roadmap for GUI development") is ignored.
+     "Machine/Deep Learning" are skill names, not plans.
    - education = first `DEGREE`, the `ORG` up to 2 lines above or 1 below it, and the nearest date
-   - jobs = one per line with a `JOB_TITLE`, with the `ORG` on the same or a neighbouring line and the next two real dates (job titles inside Projects, Leadership or Awards sections are ignored)
+   - jobs = one per line with a `JOB_TITLE`, with the `ORG` on the same or a neighbouring line and the next two real dates (job titles inside Projects, Leadership or Awards sections are ignored). If the model finds a title but no company, the title's line is split like the rule-based parser does ("Chick-fil-A | Team Member (Cashier)")
 4. **Python does the date math**, exactly as in the other parsers. `DATE`
    entities that aren't real dates (the model sometimes tags "weekly" or
    "three years") are skipped.
@@ -209,7 +220,7 @@ skills, education, jobs, years, projects) each pair agrees on. Our run:
 | `resume_title_case.docx` | Gemini misses **Excel** (only in a job bullet); rules and NER find it |
 | `resume_numeric_dates.docx` | all three agree on every field |
 | `resume_comma_skills.docx` | NER splits the hyphenated name ("Elena Vasquez" + "Moreau" as a skill) and puts the company in the title slot for the first job |
-| `data/sample.pdf` | NER misses the company "Chick-fil-A", adds a place name and a course name as skills, and keeps "Microsoft Excel" whole; Gemini adds "Word"; jobs, months and education agree |
+| `data/sample.pdf` | (before entity linking and company recovery) NER missed the company "Chick-fil-A", added a place name and a course name as skills, and kept "Microsoft Excel" whole; Gemini adds "Word"; jobs, months and education agree |
 
 | Pair | Fields that agree (of 32) |
 |---|---|
@@ -595,12 +606,18 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
   size (30 → 60 resumes), and the extra sections (coursework, languages,
   leadership) were added after looking at how the model failed on
   `data/sample.pdf`. Treat 0.942 as optimistic for real resumes.
-- **Known mistakes:** hyphenated names split, hyphenated brand names
+- **Known model mistakes:** hyphenated names split, hyphenated brand names
   ("Chick-fil-A") not seen as companies, place names or course names
   tagged as skills, a company and a job title swapped in unfamiliar layouts.
-- **Course names aren't skills by our labeling rules,** so a skill that
-  appears only in "Relevant Coursework" (e.g. "Algorithms") isn't counted.
-  That lowers Agent 3 scores compared to the rules (90 vs 100 on sample.pdf).
+  Entity linking now drops skill entities that aren't known skills, the
+  "Company | Title" split recovers a missed company, and coursework skills
+  come from the text match, so on sample.pdf these no longer reach the profile.
+- **Only skills in `skills.txt` are kept.** Linking drops anything else,
+  including real skills that aren't on the list ("Word", "Kubernetes").
+  Adding a skill to `skills.txt` changes the NER training data generator,
+  so the model must be retrained (`python scripts/train_ner.py`).
+- **The future-work rule is word-based:** a real skill mentioned only in a
+  sentence that also says "learning" or "plan" is dropped.
 - **Layout still matters** for grouping entities into jobs and education
   (same line or neighbouring lines).
 - The trained model (15 MB) is committed in `models/resume_ner/`, so every
