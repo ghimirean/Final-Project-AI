@@ -144,11 +144,11 @@ EXPECTED = {
         "skills": ["Java", "C++", "Python", "Git"],
         "education": {"institution": "Orchard Valley University",
                       "degree": "Bachelor of Science in Computer Science",
-                      "graduation": "Expected Spring 2026"},
-        # One reasonable reading: Spring = Jan-May, Summer = Jun-Aug, Fall = Sep-Dec,
-        # so Sep 2023-May 2024 = 9 months and Jun 2022-Dec 2023 = 19 months
-        "experience": [("Orchard Valley University", "Teaching Assistant", 9),
-                       ("Northgate Robotics Club", "Software Lead", 19)],
+                      "graduation": "Spring 2026"},     # "Expected" isn't part of the date
+        # Seasons are fixed months: Spring = Jan, Summer = Jun, Fall = Sep, Winter = Dec,
+        # so Sep 2023 - Jan 2024 = 5 months and Jun 2022 - Sep 2023 = 16 months
+        "experience": [("Orchard Valley University", "Teaching Assistant", 5),
+                       ("Northgate Robotics Club", "Software Lead", 16)],
         "projects": [],
     },
 }
