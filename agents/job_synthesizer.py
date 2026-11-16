@@ -459,18 +459,64 @@ def nice_to_have_skills(description, skills):
     return nice
 
 
-def embedding_assessment(job, breakdown, req, matches):
+# Words that start a degree / field-of-study clause: "Bachelor's degree in X",
+# "students studying X", "majoring in X"
+DEGREE_CLAUSE = (r"\b(?:degree|bachelor'?s?|master'?s?|ph\.?d|doctorate|associate'?s?"
+                 r"|studying|majoring|major)\b")
+
+
+def sentence_with(phrase, text):
+    """The sentence of `text` that contains `phrase` (any case), and where."""
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        at = sentence.lower().find(phrase.lower())
+        if at >= 0:
+            return sentence, at
+    return "", -1
+
+
+def phrase_kind(phrase, description, skill_list):
+    """Is a key phrase something the candidate can lack, or does it just
+    describe the job? Checked in this order:
+      "skill"      it contains a skill from skills.txt ("Docker containers")
+      "degree"     it is a degree ("Bachelor"), or it comes after a degree
+                   word in its sentence ("Bachelor's degree in Computer Science")
+      "experience" it comes after "N years" in its sentence
+                   ("5+ years of professional backend experience")
+      "role"       anything else: what the role, team or company is like
+                   ("junior developer", "designers", "small business clients")
+    Only the first three can become gaps."""
+    if extract_skills(phrase, skill_list):
+        return "skill"
+    if extract_degree(phrase):
+        return "degree"
+    sentence, at = sentence_with(phrase, description)
+    before = sentence[:at].lower() if at >= 0 else ""
+    if re.search(DEGREE_CLAUSE, before):
+        return "degree"
+    if re.search(YEARS_PATTERN, before, re.IGNORECASE):
+        return "experience"
+    return "role"
+
+
+def embedding_assessment(job, breakdown, req, matches, skill_list=None):
     """Key points from KeyBERT phrases + embedding matches against the resume.
     matches: from keypoints.match_phrases(). Same fields as the other methods,
-    plus "key_point_matches" (the evidence behind every key point)."""
+    plus "key_point_matches" (the evidence behind every key point, with its
+    "kind": skill / degree / experience / role)."""
+    if skill_list is None:
+        skill_list = load_skills(SKILLS_PATH)
+    matches = [dict(m, kind=phrase_kind(m["phrase"], job["description"], skill_list))
+               for m in matches]
     nice = nice_to_have_skills(job["description"], req["skills"])
     missing = [s for s in breakdown["missing_skills"] if s not in nice]
 
     def mentions_missing_skill(phrase):
         return any(s.lower() in phrase.lower() for s in missing)
 
-    # Phrases the resume shows no sign of (and that aren't just a missing skill again)
-    uncovered = [m["phrase"] for m in matches
+    # Requirements the resume shows no sign of. Role descriptions never count,
+    # and a phrase that is just a missing skill again isn't repeated.
+    requirements = [m for m in matches if m["kind"] != "role"]
+    uncovered = [m["phrase"] for m in requirements
                  if not m["covered"] and not mentions_missing_skill(m["phrase"])]
     covered = [m for m in matches if m["covered"]]
 
@@ -481,8 +527,9 @@ def embedding_assessment(job, breakdown, req, matches):
     focus = (probes + checks)[:MAX_FOCUS]
 
     reason = make_reason(breakdown)
-    summary = (f"{reason} The resume shows {len(covered)} of {len(matches)} key points "
-               "of the posting.") if matches else reason
+    shown = sum(m["covered"] for m in requirements)
+    summary = (f"{reason} The resume shows {shown} of the {len(requirements)} requirements "
+               "among the key points.") if requirements else reason
     return {
         "key_points": [m["phrase"] for m in matches]
                       or ["No specific requirements found in the posting"],
@@ -514,7 +561,8 @@ class KeyPointer:
                     self.lines = resume_lines(resume_text(self.profile))
                     self.line_vectors = embed(self.lines) if self.lines else None
                 matches = match_phrases(phrases, self.lines, self.skills, self.line_vectors)
-                return embedding_assessment(job, breakdown, req, matches), "embeddings"
+                return (embedding_assessment(job, breakdown, req, matches, self.skill_list),
+                        "embeddings")
             except EmbeddingError as e:
                 self.broken = True
                 print(f"[Agent 3] Embedding key points unavailable ({e}); using rules.",

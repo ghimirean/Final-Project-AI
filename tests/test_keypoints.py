@@ -15,7 +15,8 @@ import embeddings
 import keypoints
 import llm
 from job_synthesizer import (
-    embedding_assessment, extract_requirements, nice_to_have_skills, rank_jobs, score_match,
+    SKILLS_PATH, embedding_assessment, extract_requirements, load_skills, nice_to_have_skills,
+    phrase_kind, rank_jobs, score_match,
 )
 from keypoints import COVERED_AT, candidate_phrases, extract_keyphrases, match_phrases, resume_lines
 
@@ -145,22 +146,55 @@ def test_nice_to_have_from_plus_bonus_preferred():
     assert nice_to_have_skills(JOBS["job-003"]["description"], ["Python", "Tableau"]) == ["Tableau"]
 
 
+def match(phrase, covered, evidence=None):
+    return {"phrase": phrase, "relevance": 0.5, "resume_similarity": 0.6 if covered else 0.2,
+            "covered": covered, "evidence": evidence}
+
+
+@pytest.mark.parametrize("job_id, phrase, kind", [
+    ("job-002", "performance-critical C++ services", "skill"),   # contains a listed skill
+    ("job-001", "Bachelor", "degree"),                           # is a degree
+    ("job-001", "Computer Science", "degree"),                   # "degree in Computer Science"
+    ("job-002", "Computer Science", "degree"),                   # "students studying Computer Science"
+    ("job-005", "professional backend", "experience"),           # "5+ years of professional backend ..."
+    ("job-006", "building websites", "experience"),              # "1 year of experience building websites"
+    ("job-005", "Computer Science", "degree"),                   # same sentence, after the degree word
+    ("job-001", "junior developer", "role"),
+    ("job-002", "Summer internship", "role"),
+    ("job-006", "designers", "role"),
+    ("job-006", "small business clients", "role"),
+])
+def test_phrase_kind(job_id, phrase, kind):
+    assert phrase_kind(phrase, JOBS[job_id]["description"], load_skills(SKILLS_PATH)) == kind
+
+
 def test_assessment_fields_and_interview_order():
     job = JOBS["job-001"]
     req = extract_requirements(job)
     b = score_match(STUDENT, job)["breakdown"]
-    matches = [{"phrase": "internal tools", "relevance": 0.6, "resume_similarity": 0.7,
-                "covered": True, "evidence": "Built internal tools in Java."},
-               {"phrase": "clean code", "relevance": 0.3, "resume_similarity": 0.2,
-                "covered": False, "evidence": None}]
+    matches = [match("internal tools", True, "Built internal tools in Java."),
+               match("Computer Science", False)]
     a = embedding_assessment(job, b, req, matches)
-    assert a["key_points"] == ["internal tools", "clean code"]
+    assert a["key_points"] == ["internal tools", "Computer Science"]
     assert "C++" in a["nice_to_have"] and "C++" not in a["required_skills"]
-    assert "clean code" in a["gaps"]
+    assert "Computer Science" in a["gaps"]                    # a degree requirement
     assert a["interview_focus"][0].endswith("(asked for, not on the resume)")    # gaps first
     assert a["interview_focus"][-1].startswith("internal tools (ask for an example")
-    assert "1 of 2 key points" in a["fit_summary"]
-    assert a["key_point_matches"] == matches
+    assert "0 of the 1 requirements" in a["fit_summary"]      # role phrases aren't requirements
+    assert [m["kind"] for m in a["key_point_matches"]] == ["role", "degree"]
+
+
+def test_role_descriptions_are_never_gaps():
+    job = JOBS["job-006"]
+    b = score_match(STUDENT, job)["breakdown"]
+    matches = [match("designers", False), match("small business clients", False),
+               match("building websites", False)]
+    a = embedding_assessment(job, b, extract_requirements(job), matches)
+    assert a["key_points"] == ["designers", "small business clients", "building websites"]
+    assert "designers" not in a["gaps"] and "small business clients" not in a["gaps"]
+    assert "building websites" in a["gaps"]                   # an experience requirement
+    probes = " ".join(a["interview_focus"])
+    assert "designers" not in probes and "small business clients" not in probes
 
 
 # ---------- rank_jobs: embeddings by default, no LLM ----------

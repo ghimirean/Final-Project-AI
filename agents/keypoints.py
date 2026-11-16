@@ -48,7 +48,7 @@ TOKEN = r"[A-Za-z][A-Za-z0-9+#.]*[A-Za-z0-9+#]|[A-Za-z]"
 # Words that say nothing about the job when they start or end a phrase
 FILLER = {
     "ability", "bonus", "candidate", "candidates", "daily", "degree", "experience",
-    "familiarity", "field", "hiring", "knowledge", "plus", "requirement", "requirements",
+    "familiarity", "field", "hiring", "knowledge", "plus", "related", "requirement", "requirements",
     "role", "solid", "strong", "student", "students", "team", "understanding",
     "work", "year", "years",
 }
