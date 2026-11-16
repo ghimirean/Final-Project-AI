@@ -20,7 +20,7 @@ from pipeline import run_pipeline  # noqa: E402
 from job_search_agent import run_job_agent  # noqa: E402
 from job_synthesizer import SKILLS_PATH  # noqa: E402
 from jsearch_provider import JSearchProvider, ProviderError  # noqa: E402
-from resume_parser import parse_resume_llm  # noqa: E402
+from resume_parser import parse_resume_ner  # noqa: E402
 
 app = FastAPI(title="INTERVAI - Resume parser + job ranking")
 
@@ -59,7 +59,8 @@ async def search(resume: UploadFile = File(...), location: str = Form(""),
                  limit: int = Form(20)):
     """resume: a .pdf or .docx file. location: optional city/state text.
     limit: most jobs to return (1 to 50, default 20).
-    Agent 1 parses the resume, then Agent 2 (an LLM agent) searches for jobs.
+    Agent 1 (the NER parser) parses the resume, then Agent 2 (an LLM agent)
+    searches for jobs.
     Returns {"profile": ..., "jobs": [...], "search_mode": "llm" or "rules",
     "trace": [...]}. "jobs" has the format /rank expects, but it can be empty
     (and /rank rejects an empty list), so check it before ranking.
@@ -76,7 +77,7 @@ async def search(resume: UploadFile = File(...), location: str = Form(""),
         tmp.write(await resume.read())
         tmp_path = tmp.name
     try:
-        profile = parse_resume_llm(tmp_path, skills_path=SKILLS_PATH)
+        profile = parse_resume_ner(tmp_path, skills_path=SKILLS_PATH)
     finally:
         os.remove(tmp_path)
 

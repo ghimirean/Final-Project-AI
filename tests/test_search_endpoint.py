@@ -1,10 +1,11 @@
-"""Tests for the FastAPI /search endpoint: Agent 1 parses the resume, then
-Agent 2 (the LLM search agent) finds jobs.
+"""Tests for the FastAPI /search endpoint: Agent 1 (the NER parser) parses
+the resume, then Agent 2 (the LLM search agent) finds jobs.
 
 No real LLM or job site is called: the job provider is a fake and the search
-agent's LLM is a scripted fake. Agent 1 uses the same offline fallback as the
-/rank tests (the network is blocked in conftest.py), so the resume is parsed
-by the rule-based parser. All data here is fake.
+agent's LLM is a scripted fake. /search calls parse_resume_ner, but
+conftest.py blocks the trained NER model, so Agent 1 falls back to the
+rule-based parser (parsed_by = "rules"), the same as in the /rank tests.
+All data here is fake.
 
 Run from project root:  python -m pytest -v
 """
@@ -89,11 +90,30 @@ def test_search_endpoint_ok(monkeypatch):
     body = response.json()
     assert set(body) == {"profile", "jobs", "search_mode", "trace"}
     assert body["profile"]["name"] == "Priya Nandakumar"
+    assert body["profile"]["parsed_by"] == "rules"     # NER blocked in tests -> rules
     assert "raw_text" not in body["profile"]
     assert body["search_mode"] == "llm"
     assert len(body["jobs"]) == 2
     validate_jobs(body["jobs"])                       # ready to send to /rank
     assert provider.queries[0]["location"] == "Louisiana"
+
+
+def test_search_parses_resume_with_ner(monkeypatch):
+    calls = []
+
+    def fake_ner(path, skills_path):
+        calls.append(path)
+        return {"name": "Test Person", "skills": ["Python"], "experience": [],
+                "experience_years": 1.0, "projects": [], "parsed_by": "ner",
+                "raw_text": "resume text"}
+
+    monkeypatch.setattr(api, "parse_resume_ner", fake_ner)
+    script(monkeypatch, SEARCH, FINISH)
+    response = post_search(monkeypatch, FakeProvider([raw_job(1)]))
+    assert response.status_code == 200
+    assert len(calls) == 1
+    assert response.json()["profile"]["parsed_by"] == "ner"
+    assert "raw_text" not in response.json()["profile"]
 
 
 def test_search_falls_back_to_rules_when_llm_fails(monkeypatch):
