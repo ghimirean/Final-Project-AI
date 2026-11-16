@@ -8,7 +8,7 @@ calling the agents one by one.
     result["profile"]       # Agent 1 output (without raw_text)
     result["ranked_jobs"]   # Agent 3 output, best match first
 """
-from resume_parser import parse_resume, parse_resume_llm
+from resume_parser import parse_resume, parse_resume_llm, parse_resume_ner
 from job_synthesizer import rank_jobs, SKILLS_PATH
 
 JOB_FIELDS = {"id", "title", "company", "location", "url", "description"}
@@ -26,16 +26,23 @@ def validate_jobs(jobs):
             raise ValueError(f"job #{i} is missing fields: {sorted(missing)}")
 
 
-def run_pipeline(resume_path, jobs, use_llm=True):
+PARSERS = {"ner": parse_resume_ner, "llm": parse_resume_llm, "rules": parse_resume}
+
+
+def run_pipeline(resume_path, jobs, use_llm=True, parser="ner"):
     """Parses a resume (.pdf or .docx) and ranks the given jobs for it.
-    use_llm=True (default): Agent 1 (Gemini) parses the resume and Agent 3
-        (Groq) writes key points, each with a rule-based fallback.
-    use_llm=False: rules only, no API calls.
+    parser: how Agent 1 reads the resume: "ner" (default, local NER model),
+        "llm" (Gemini) or "rules". NER and LLM fall back to rules on failure.
+    use_llm=True (default): Agent 3 (Groq) writes key points for the top jobs.
+    use_llm=False: no API calls at all (an "llm" parser becomes "rules").
     Returns {"profile": {...}, "ranked_jobs": [...]}.
     """
     validate_jobs(jobs)
-    parse = parse_resume_llm if use_llm else parse_resume
-    profile = parse(resume_path, skills_path=SKILLS_PATH)
+    if parser not in PARSERS:
+        raise ValueError(f"parser must be one of {sorted(PARSERS)}")
+    if parser == "llm" and not use_llm:
+        parser = "rules"
+    profile = PARSERS[parser](resume_path, skills_path=SKILLS_PATH)
     ranked = rank_jobs(profile, jobs, use_llm=use_llm)   # uses raw_text for similarity
     # raw_text is only needed for scoring; leave it out of the result
     public_profile = {k: v for k, v in profile.items() if k != "raw_text"}
