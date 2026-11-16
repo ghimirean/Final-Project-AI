@@ -1,22 +1,22 @@
 """Trains Agent 1's resume NER model and reports precision / recall / F1.
 
 Starts from spaCy's pretrained English model (en_core_web_sm) and
-fine-tunes its NER component on our 30 annotated fake resumes
+fine-tunes its NER component on our 60 annotated fake resumes
 (tests/fixtures/ner/resumes.jsonl) to recognize:
     PERSON, ORG, DEGREE, JOB_TITLE, SKILL, DATE
 (en_core_web_sm already knows PERSON, ORG and DATE; DEGREE, JOB_TITLE and
 SKILL are new labels it learns here.)
 
 Data split (fixed seed, so every run uses the same split):
-    24 resumes for training, 6 held out for testing (80/20).
+    48 resumes for training, 12 held out for testing (80/20).
 Two test sets are reported:
-    1. "synthetic test": the 6 held-out generated resumes
+    1. "synthetic test": the 12 held-out generated resumes
     2. "handmade": the 3 hand-written fixture resumes, whose layouts the
        generator never produces, a fairer check of generalization
 Scores are exact-match: an entity counts as correct only if its start,
 end AND label all match the annotation.
 
-Run from project root (about a minute):
+Run from project root (about 20 seconds):
     python scripts/train_ner.py
 Saves the model to models/resume_ner/ (git-ignored; re-run this script to
 rebuild it) together with models/resume_ner/metrics.json.
@@ -33,7 +33,7 @@ MODEL_DIR = os.path.join(ROOT, "models", "resume_ner")
 LABELS = ["PERSON", "ORG", "DEGREE", "JOB_TITLE", "SKILL", "DATE"]
 BASE_MODEL = "en_core_web_sm"
 SEED = 0
-TEST_SIZE = 6
+TEST_SIZE = 12
 EPOCHS = 30
 DROPOUT = 0.3
 
@@ -128,7 +128,7 @@ if __name__ == "__main__":
     results = {"synthetic_test": evaluate(nlp, test_records), "handmade": evaluate(nlp, handmade)}
 
     print_table(f"BASELINE {BASE_MODEL} (no fine-tuning), synthetic test set", baseline["synthetic_test"])
-    print_table("FINE-TUNED, synthetic test set (6 held-out generated resumes)", results["synthetic_test"])
+    print_table("FINE-TUNED, synthetic test set (12 held-out generated resumes)", results["synthetic_test"])
     print_table("FINE-TUNED, handmade set (3 resumes in unseen layouts)", results["handmade"])
 
     os.makedirs(MODEL_DIR, exist_ok=True)

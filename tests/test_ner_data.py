@@ -15,9 +15,11 @@ with open(os.path.join(NER_DIR, "resumes.jsonl"), encoding="utf-8") as f:
     RECORDS = [json.loads(line) for line in f]
 
 
-def test_thirty_resumes_with_unique_ids():
-    assert len(RECORDS) == 30
-    assert len({r["id"] for r in RECORDS}) == 30
+def test_sixty_resumes_with_unique_ids_and_names():
+    assert len(RECORDS) == 60
+    assert len({r["id"] for r in RECORDS}) == 60
+    names = [e[3].title() for r in RECORDS for e in r["entities"] if e[2] == "PERSON"]
+    assert len(set(names)) == 60
 
 
 def test_file_matches_generator():
@@ -66,6 +68,9 @@ def test_data_is_fake():
     ("SKILL", "github.com"),          # links are not skills
     ("JOB_TITLE", "Team Lead"),       # project roles are not job titles
     ("DATE", "Expected"),             # "Expected" is not part of the date
+    ("SKILL", "English"),             # spoken languages are not skills
+    ("SKILL", "Operating Systems"),   # course names are not skills
+    ("JOB_TITLE", "Vice President"),  # club roles are not job titles
 ])
 def test_labeling_guidelines(label, not_labeled):
     for r in RECORDS:

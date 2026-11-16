@@ -20,7 +20,7 @@ HANDMADE = load_records("handmade_eval.jsonl")
 
 def test_split_is_80_20_disjoint_and_fixed():
     train_set, test_set = split(RECORDS)
-    assert (len(train_set), len(test_set)) == (24, 6)
+    assert (len(train_set), len(test_set)) == (48, 12)
     assert not {r["id"] for r in train_set} & {r["id"] for r in test_set}
     assert split(RECORDS) == (train_set, test_set)            # same seed, same split
 

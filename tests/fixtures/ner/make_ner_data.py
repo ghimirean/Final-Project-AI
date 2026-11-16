@@ -1,6 +1,6 @@
 """Generates the annotated NER training data for Agent 1.
 
-Builds 30 FAKE resumes (invented people, companies, schools; example.com
+Builds 60 FAKE resumes (invented people, companies, schools; example.com
 emails; 555 phone numbers) in many different layouts, and records the
 exact character position of every entity while the text is being written.
 Because the generator places each entity itself, the labels can't drift
@@ -31,13 +31,19 @@ Labeling guidelines:
              not links ("github.com/x" is not a SKILL), not "GitHub:" used as a link label
   DATE       each single date ("Jan 2022", "01/2022", "2022", "Present"); a range is
              two DATE entities, and words like "Expected" are not part of the date
+  Not labeled: cities/states, course names ("Relevant Coursework: ..."), honors and
+             scholarships, spoken languages ("Languages: English, Spanish"), project
+             names, and roles in clubs (the club itself is an ORG)
 """
+import itertools
 import json
 import os
 import random
 
 LABELS = ["PERSON", "ORG", "DEGREE", "JOB_TITLE", "SKILL", "DATE"]
-N_RESUMES = 30
+# 60, not 30: with 30 the model often confused job titles and companies on
+# unseen layouts; 45-60 resumes fixed most of that (see scripts/train_ner.py).
+N_RESUMES = 60
 SEED = 42
 HERE = os.path.dirname(os.path.abspath(__file__))
 LATEST_MONTH = 2026 * 12 + 10      # Nov 2026 (months counted from 0): no job ends after this
@@ -55,16 +61,20 @@ COMPANIES = ["Brightline Analytics", "Lakeside Robotics", "Harbor Tech Repair", 
              "Redwood Data Labs", "Bluefin Systems", "Granite Peak Consulting", "Orchard Lane Grocers",
              "Tidewater Energy", "Maplewood Software", "Ironclad Payments", "Sunrise Coffee Co.",
              "Kestrel Cloud", "Hollow Oak Games", "Meridian Insurance Group", "Copperline Telecom",
-             "Fernbrook Library", "Starling Retail", "Vantage Point Marketing", "Riverbend Clinic"]
+             "Fernbrook Library", "Starling Retail", "Vantage Point Marketing", "Riverbend Clinic",
+             "Bun-n-Bake", "Pick-n-Go Market", "Department of Public Works", "Office of Student Affairs",
+             "City Water Authority"]
 SCHOOLS = ["Northfield State University", "Westbrook Institute of Technology",
            "Riverbend Community College", "University of Lakemont", "Cedar Valley College",
            "Eastgate University", "Pinehurst Technical Institute", "Southport State University"]
 TECH_TITLES = ["Software Engineer Intern", "Junior Data Analyst", "Web Developer", "IT Support Technician",
                "Backend Developer", "QA Tester", "Data Engineering Intern", "Machine Learning Intern",
                "Full Stack Developer", "Teaching Assistant", "Research Assistant", "Systems Administrator",
-               "Frontend Developer", "Database Administrator", "DevOps Intern", "Mobile Developer"]
+               "Frontend Developer", "Database Administrator", "DevOps Intern", "Mobile Developer",
+               "Test Lead", "Software Developer (Intern)"]
 OTHER_TITLES = ["Cashier", "Shift Lead", "Barista", "Sales Associate", "Library Assistant",
-                "Warehouse Associate", "Customer Service Representative", "Tutor"]
+                "Warehouse Associate", "Customer Service Representative", "Tutor",
+                "Team Member (Cashier)", "Crew Member (Drive-Thru)", "Sales Associate (Part-Time)"]
 DEGREES = ["Bachelor of Science in Computer Science", "Bachelor of Science in Information Technology",
            "Bachelor of Science in Statistics", "Master of Science in Data Science",
            "Bachelor of Arts in Economics", "Associate of Science in Computer Science",
@@ -81,6 +91,17 @@ PROJECTS = ["Campus Event Finder", "Budget Buddy", "Sales Trend Dashboard", "Lin
             "Parking Spot Tracker", "Study Group Matcher", "Inventory Forecaster", "Trail Map App"]
 PROJECT_ROLES = ["Team Lead", "Developer", "Solo Project", "Backend Lead", "Contributor"]
 CITIES = ["Monroe, LA", "Austin, TX", "Remote", "Dallas, TX", "Denver, CO", "Raleigh, NC"]
+CITY_STATES = ["Monroe, Louisiana", "Austin, Texas", "Raleigh, North Carolina", "Denver, Colorado",
+               "Tacoma, Washington", "Dayton, Ohio"]
+COURSES = ["Data Structures", "Operating Systems", "Computer Networks", "Discrete Mathematics",
+           "Database Systems", "Analysis of Algorithms", "Software Engineering", "Linear Algebra",
+           "Calculus II", "Computer Architecture"]
+HONORS = ["Dean's List", "Presidential Scholarship", "Merit Scholarship", "Honors College",
+          "President's List"]
+SPOKEN = ["English", "Spanish", "French", "Mandarin", "Hindi", "Bengali", "Arabic", "Portuguese"]
+CLUBS = ["Robotics Club", "Campus Coding Club", "Women in Computing Society", "Habitat Volunteers",
+         "Math Tutoring Center", "Student Government Association"]
+CLUB_ROLES = ["Vice President", "Treasurer", "Volunteer Tutor", "Event Coordinator", "Member"]
 MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August",
           "September", "October", "November", "December"]
 BULLETS = ["• ", "- ", "● ", "* ", "▪ "]
@@ -170,7 +191,7 @@ class Resume:
                             f"555.{rng.randint(100, 999)}.{rng.randint(1000, 9999)}"])
         link = rng.choice([f"linkedin.com/in/{first.lower()}-{last.lower()}",
                            f"github.com/{first.lower()}{last.lower()}"])
-        style = rng.randint(1, 4)
+        style = rng.randint(1, 5)
         full = f"{first} {last}"
         if style == 4:
             full = full.upper()
@@ -183,8 +204,11 @@ class Resume:
         elif style == 3:
             label = "GitHub" if "github" in link else "LinkedIn"
             b.add(f"Email: {email}  Phone: {phone}\n{label}: {link}")
-        else:
+        elif style == 4:
             b.add(f"{phone} · {email}")
+        else:
+            b.add(f"{rng.choice(CITY_STATES)} | {email} | {phone}\n"
+                  f"LinkedIn: linkedin.com/in/{first.lower()}{rng.randint(1, 99)}")
         b.newline()
 
     def summary(self, skills):
@@ -201,7 +225,7 @@ class Resume:
 
     def job(self, company, title, start, end, tech, skills):
         rng, b = self.rng, self.b
-        layout = rng.randint(1, 6)
+        layout = rng.randint(1, 7)
         if layout == 1:                      # Company | Title \n dates
             b.add(company, "ORG"); b.add(" | "); b.add(title, "JOB_TITLE"); b.newline()
             self.add_range(start, end)
@@ -218,8 +242,12 @@ class Resume:
         elif layout == 5:                    # Company — Title — dates
             b.add(company, "ORG"); b.add(" — "); b.add(title, "JOB_TITLE"); b.add(" — ")
             self.add_range(start, end)
-        else:                                # Title | Company | dates
+        elif layout == 6:                    # Title | Company | dates
             b.add(title, "JOB_TITLE"); b.add(" | "); b.add(company, "ORG"); b.add(" | ")
+            self.add_range(start, end)
+        else:                                # Company | Title \n City, State dates
+            b.add(company, "ORG"); b.add(" | "); b.add(title, "JOB_TITLE"); b.newline()
+            b.add(f"{rng.choice(CITY_STATES)} ")
             self.add_range(start, end)
         b.newline()
         for _ in range(rng.randint(1, 2)):
@@ -251,7 +279,7 @@ class Resume:
         self.heading(["Education", "Academic Background"])
         school, degree = rng.choice(SCHOOLS), rng.choice(DEGREES)
         grad = (rng.randint(2019, 2029), rng.choice([5, 8, 12]))
-        layout = rng.randint(1, 4)
+        layout = rng.randint(1, 5)
         if layout == 3 and grad[0] < 2027:   # "Expected" only makes sense for a future date
             layout = 1
         if layout == 1:                      # School \n Degree \n date
@@ -263,16 +291,26 @@ class Resume:
         elif layout == 3:                    # School — Degree (Expected date)
             b.add(school, "ORG"); b.add(" — "); b.add(degree, "DEGREE"); b.add(" (Expected ")
             b.add(self.date_text(*grad), "DATE"); b.add(")")
-        else:                                # Degree | School | GPA | date
+        elif layout == 4:                    # Degree | School | GPA | date
             b.add(degree, "DEGREE"); b.add(" | "); b.add(school, "ORG")
             b.add(f" | GPA {rng.choice(['3.2', '3.5', '3.8', '3.9'])} | ")
             b.add(self.date_text(*grad), "DATE")
+        else:                                # School \n City, State date \n Degree
+            b.add(school, "ORG"); b.newline()
+            b.add(f"{rng.choice(CITY_STATES)} "); b.add(self.date_text(*grad), "DATE"); b.newline()
+            b.add(degree, "DEGREE")
         b.newline()
+        # Extra lines that are NOT entities: honors and coursework
+        if rng.random() < 0.5:
+            b.add(f"{self.bullet}Honors: " + "; ".join(rng.sample(HONORS, 2))); b.newline()
+        if rng.random() < 0.6:
+            b.add(f"{self.bullet}Relevant Coursework: " + ", ".join(rng.sample(COURSES, 4)))
+            b.newline()
 
     def skills_section(self, skills):
         rng, b = self.rng, self.b
         self.heading(["Skills", "Technical Skills", "Core Competencies", "Tools & Technologies"])
-        style = rng.randint(1, 3)
+        style = rng.randint(1, 4)
         if style == 1:                       # comma-separated line
             for i, skill in enumerate(skills):
                 if i:
@@ -282,15 +320,23 @@ class Resume:
         elif style == 2:                     # one bullet per skill
             for skill in skills:
                 b.add(self.bullet); b.add(skill, "SKILL"); b.newline()
-        else:                                # categories
+        else:                                # categories (style 4: bulleted, with a period)
             half = len(skills) // 2
-            for category, group in [("Languages", skills[:half]), ("Tools", skills[half:])]:
-                b.add(f"{category}: ")
+            names = rng.choice([("Languages", "Tools"), ("Programming", "Tools & Software"),
+                                ("Programming Languages", "Frameworks")])
+            prefix, end = (self.bullet, ".") if style == 4 else ("", "")
+            for category, group in zip(names, [skills[:half], skills[half:]]):
+                b.add(f"{prefix}{category}: ")
                 for i, skill in enumerate(group):
                     if i:
                         b.add(", ")
                     b.add(skill, "SKILL")
+                b.add(end)
                 b.newline()
+        if rng.random() < 0.4:               # spoken languages are NOT skills
+            b.add(f"{'Spoken Languages' if style == 3 and names[0] == 'Languages' else 'Languages'}: "
+                  + ", ".join(rng.sample(SPOKEN, 3)))
+            b.newline()
 
     def projects(self, skills):
         rng, b = self.rng, self.b
@@ -309,12 +355,27 @@ class Resume:
             self.skill_sentence(rng.sample(skills, rng.randint(1, 3)))
             b.newline()
 
+    def leadership(self):
+        rng, b = self.rng, self.b
+        if rng.random() < 0.6:
+            return
+        self.heading(["Leadership", "Achievements and Leadership", "Activities"])
+        for club in rng.sample(CLUBS, rng.randint(1, 2)):
+            b.add(f"{rng.choice(CLUB_ROLES)} | ")            # club roles are not JOB_TITLE
+            b.add(club, "ORG"); b.add(" ")
+            year = rng.randint(2022, 2026)
+            self.add_range((year, rng.randint(1, 10)), None)
+            b.newline()
+            b.add(f"{self.bullet}Organized weekly meetings and events for members")
+            b.newline()
+
     def build(self, name):
         skills = self.rng.sample(SKILLS, self.rng.randint(5, 10))
         self.header(name)
         self.summary(skills)
         sections = [lambda: self.experience(skills), self.education,
-                    lambda: self.skills_section(skills), lambda: self.projects(skills)]
+                    lambda: self.skills_section(skills), lambda: self.projects(skills),
+                    self.leadership]
         if self.rng.random() < 0.5:                       # education first for some students
             sections[0], sections[1] = sections[1], sections[0]
         for section in sections:
@@ -325,7 +386,7 @@ class Resume:
 
 def generate(n=N_RESUMES, seed=SEED):
     rng = random.Random(seed)
-    names = list(zip(rng.sample(FIRST, n), rng.sample(LAST, n)))
+    names = rng.sample(list(itertools.product(FIRST, LAST)), n)     # unique full names
     return [Resume(rng, i + 1).build(names[i]) for i in range(n)]
 
 
