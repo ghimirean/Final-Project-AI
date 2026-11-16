@@ -187,6 +187,11 @@ def test_prompt_has_no_contact_details_or_raw_text(monkeypatch):
         assert secret not in prompt
     assert "Python" in prompt and "Sales Dashboard" in prompt
 
+def test_prompt_asks_for_short_queries_with_common_titles(monkeypatch):
+    prompts = script(monkeypatch, FINISH)
+    agent.run_job_agent(PROFILE, FakeProvider())
+    assert "common job title" in prompts[0]
+    assert "1 or 2 skills" in prompts[0]
 
 def test_clean_query_fixes_bad_llm_values():
     q = agent.clean_query({"keywords": ["Python", " python ", "", "A", "B", "C", "D", "E"],

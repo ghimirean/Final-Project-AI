@@ -20,6 +20,7 @@ load_dotenv(os.path.join(ROOT, ".env"))
 URL = "https://jsearch.p.rapidapi.com/search-v2"
 HOST = "jsearch.p.rapidapi.com"
 TIMEOUT_SECONDS = 30
+MAX_QUERY_KEYWORDS = 2    # long free-text queries often match nothing
 
 
 class ProviderError(Exception):
@@ -35,9 +36,11 @@ class JSearchProvider(JobProvider):
 
     def build_query_text(self, query):
         """Agent 2 query dict -> one free-text JSearch query, e.g.
-        'Data Analyst Python SQL in Remote'. JSearch has no experience-level
-        field here, so that part of the query is not sent."""
-        words = ([query["title"]] if query.get("title") else []) + list(query.get("keywords") or [])
+        'Data Analyst Python SQL in Remote'. Only the first MAX_QUERY_KEYWORDS
+        keywords are used, because long queries return no results. JSearch has
+        no experience-level field here, so that part of the query is not sent."""
+        keywords = list(query.get("keywords") or [])[:MAX_QUERY_KEYWORDS]
+        words = ([query["title"]] if query.get("title") else []) + keywords
         text = " ".join(words) or "jobs"
         if query.get("location"):
             text += f" in {query['location']}"

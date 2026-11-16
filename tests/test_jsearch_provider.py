@@ -71,6 +71,9 @@ def test_query_text_combines_title_keywords_and_location(provider):
     q = {"title": "Data Analyst", "keywords": ["Python", "SQL"], "location": "Louisiana"}
     assert provider.build_query_text(q) == "Data Analyst Python SQL in Louisiana"
 
+def test_query_text_keeps_only_the_first_two_keywords(provider):
+    q = {"title": "Software Developer", "keywords": ["Java", "Python", "C", "C++"]}
+    assert provider.build_query_text(q) == "Software Developer Java Python"
 
 def test_query_text_without_location(provider):
     assert provider.build_query_text({"keywords": ["Python"]}) == "Python"
