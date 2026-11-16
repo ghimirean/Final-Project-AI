@@ -22,8 +22,7 @@ from llm import LLMError, ask_llm
 log = logging.getLogger(__name__)
 
 
-# One-line change to switch models. Must differ from Agent 1 (Gemini
-# gemini-3.5-flash) and Agent 3 (Groq qwen/qwen3.8-27b).
+# One-line change to switch models.
 LLM_CONFIG = {"provider": "groq", "model": "llama-3.3-70b-versatile"}
 
 MAX_STEPS = 4
