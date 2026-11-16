@@ -1,0 +1,258 @@
+{
+  "base_model": "en_core_web_sm",
+  "epochs": 30,
+  "dropout": 0.3,
+  "seed": 0,
+  "train_ids": [
+    "resume-24",
+    "resume-28",
+    "resume-29",
+    "resume-60",
+    "resume-01",
+    "resume-02",
+    "resume-42",
+    "resume-39",
+    "resume-15",
+    "resume-16",
+    "resume-52",
+    "resume-47",
+    "resume-21",
+    "resume-36",
+    "resume-11",
+    "resume-46",
+    "resume-12",
+    "resume-04",
+    "resume-18",
+    "resume-58",
+    "resume-22",
+    "resume-05",
+    "resume-41",
+    "resume-50",
+    "resume-10",
+    "resume-35",
+    "resume-54",
+    "resume-40",
+    "resume-07",
+    "resume-44",
+    "resume-19",
+    "resume-09",
+    "resume-53",
+    "resume-14",
+    "resume-38",
+    "resume-23",
+    "resume-31",
+    "resume-20",
+    "resume-26",
+    "resume-32",
+    "resume-33",
+    "resume-17",
+    "resume-03",
+    "resume-27",
+    "resume-57",
+    "resume-49",
+    "resume-25",
+    "resume-55"
+  ],
+  "test_ids": [
+    "resume-13",
+    "resume-34",
+    "resume-30",
+    "resume-37",
+    "resume-45",
+    "resume-43",
+    "resume-48",
+    "resume-06",
+    "resume-08",
+    "resume-51",
+    "resume-56",
+    "resume-59"
+  ],
+  "baseline": {
+    "synthetic_test": {
+      "per_label": {
+        "PERSON": {
+          "precision": 0.111,
+          "recall": 0.583,
+          "f1": 0.187,
+          "support": 12
+        },
+        "ORG": {
+          "precision": 0.172,
+          "recall": 0.459,
+          "f1": 0.25,
+          "support": 37
+        },
+        "DEGREE": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 12
+        },
+        "JOB_TITLE": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 22
+        },
+        "SKILL": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 182
+        },
+        "DATE": {
+          "precision": 0.667,
+          "recall": 0.358,
+          "f1": 0.466,
+          "support": 67
+        }
+      },
+      "overall": {
+        "precision": 0.242,
+        "recall": 0.145,
+        "f1": 0.181,
+        "support": 332
+      }
+    },
+    "handmade": {
+      "per_label": {
+        "PERSON": {
+          "precision": 0.429,
+          "recall": 1.0,
+          "f1": 0.6,
+          "support": 3
+        },
+        "ORG": {
+          "precision": 0.2,
+          "recall": 0.222,
+          "f1": 0.211,
+          "support": 9
+        },
+        "DEGREE": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 3
+        },
+        "JOB_TITLE": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 6
+        },
+        "SKILL": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 28
+        },
+        "DATE": {
+          "precision": 0.4,
+          "recall": 0.222,
+          "f1": 0.286,
+          "support": 18
+        }
+      },
+      "overall": {
+        "precision": 0.333,
+        "recall": 0.134,
+        "f1": 0.191,
+        "support": 67
+      }
+    }
+  },
+  "fine_tuned": {
+    "synthetic_test": {
+      "per_label": {
+        "PERSON": {
+          "precision": 1.0,
+          "recall": 0.917,
+          "f1": 0.957,
+          "support": 12
+        },
+        "ORG": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "support": 37
+        },
+        "DEGREE": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "support": 12
+        },
+        "JOB_TITLE": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "support": 22
+        },
+        "SKILL": {
+          "precision": 0.995,
+          "recall": 1.0,
+          "f1": 0.997,
+          "support": 182
+        },
+        "DATE": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "support": 67
+        }
+      },
+      "overall": {
+        "precision": 0.997,
+        "recall": 0.997,
+        "f1": 0.997,
+        "support": 332
+      }
+    },
+    "handmade": {
+      "per_label": {
+        "PERSON": {
+          "precision": 0.667,
+          "recall": 0.667,
+          "f1": 0.667,
+          "support": 3
+        },
+        "ORG": {
+          "precision": 1.0,
+          "recall": 0.889,
+          "f1": 0.941,
+          "support": 9
+        },
+        "DEGREE": {
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "support": 3
+        },
+        "JOB_TITLE": {
+          "precision": 0.75,
+          "recall": 1.0,
+          "f1": 0.857,
+          "support": 6
+        },
+        "SKILL": {
+          "precision": 0.966,
+          "recall": 1.0,
+          "f1": 0.982,
+          "support": 28
+        },
+        "DATE": {
+          "precision": 0.9,
+          "recall": 1.0,
+          "f1": 0.947,
+          "support": 18
+        }
+      },
+      "overall": {
+        "precision": 0.915,
+        "recall": 0.97,
+        "f1": 0.942,
+        "support": 67
+      }
+    }
+  }
+}

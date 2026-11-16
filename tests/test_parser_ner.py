@@ -1,6 +1,6 @@
 """Tests for the NER version of Agent 1 (parse_resume_ner).
 
-The trained model is git-ignored, so these tests use a FAKE model that
+Most of these tests use a FAKE model that
 returns hand-checked annotations (tests/fixtures/ner/handmade_eval.jsonl),
 i.e. a "perfect" NER model. That tests how Python assembles entities into
 the profile, separately from how good the model is (scripts/train_ner.py

@@ -7,9 +7,10 @@ Safety nets, applied to EVERY test:
 - No real embedding model (no downloads, no slow model loading): the one
   loader in agents/embeddings.py always fails, so Agent 3 uses its TF-IDF
   fallback unless a test installs a fake model (tests/test_embeddings.py).
-- No trained NER model (it's git-ignored, so it may not exist): the loader
-  in agents/resume_parser.py always fails, so Agent 1 uses its rule-based
-  fallback unless a test installs a fake model (tests/test_parser_ner.py).
+- No trained NER model by default: the loader in agents/resume_parser.py
+  always fails, so Agent 1 uses its rule-based fallback unless a test
+  installs a fake model (tests/test_parser_ner.py) or undoes this to load
+  the real committed model.
 """
 import os
 import sys

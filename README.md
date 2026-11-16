@@ -115,7 +115,7 @@ missing) or crashes, Agent 1 logs a warning and uses the rule-based parser
   batch size 4, dropout 0.3, fixed seed. **48 resumes train, 12 test**
   (80/20). Takes about 20 seconds.
   ```bash
-  python scripts/train_ner.py     # retrains and saves models/resume_ner/ (15 MB, git-ignored)
+  python scripts/train_ner.py     # retrains and saves models/resume_ner/ (15 MB, committed to git)
   ```
 
 ### Evaluation (exact match: start, end and label must all be right)
@@ -514,8 +514,9 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
   That lowers Agent 3 scores compared to the rules (90 vs 100 on sample.pdf).
 - **Layout still matters** for grouping entities into jobs and education
   (same line or neighbouring lines).
-- The model must be trained locally (`python scripts/train_ner.py`), since
-  it's git-ignored. Until then Agent 1 uses the rules.
+- The trained model (15 MB) is committed in `models/resume_ner/`, so every
+  clone uses the same model. Retraining is only needed after changing the
+  training data; with the fixed seed it reproduces the same scores.
 
 **Agent 1, LLM path (optional)**
 - **Resume text is sent to Google (Gemini).** Real resumes are personal

@@ -18,8 +18,14 @@ end AND label all match the annotation.
 
 Run from project root (about 20 seconds):
     python scripts/train_ner.py
-Saves the model to models/resume_ner/ (git-ignored; re-run this script to
-rebuild it) together with models/resume_ner/metrics.json.
+Saves the model to models/resume_ner/ together with metrics.json. The
+trained model is committed to git, so every clone uses the identical
+model and nobody needs to run this script just to use Agent 1.
+
+Reproducible: SEED fixes the train/test split, the shuffle order and
+spaCy's own randomness (spacy.util.fix_random_seed), so with the same
+spaCy / en_core_web_sm versions (pinned in requirements.txt) a retrain
+gives the same predictions and the same scores.
 """
 import json
 import os
