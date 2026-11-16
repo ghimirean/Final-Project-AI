@@ -162,3 +162,27 @@ def test_short_aliases_need_exact_case():
     assert extract_skills("ML pipelines", SKILL_LIST) == ["Machine Learning"]
     assert extract_skills("html markup", ["Machine Learning"]) == []
     assert extract_skills("I like the ml in html", ["Machine Learning"]) == []
+
+
+# ---------- planned / future work is not a skill ----------
+
+from resume_parser import future_spans, resume_skills_in_text  # noqa: E402
+
+
+@pytest.mark.parametrize("text, skills", [
+    ("Utilized Git for version control and documented a future roadmap for Docker support.", ["Git"]),
+    ("Currently learning Python.", []),
+    ("I plan to learn React next year.", []),
+    ("Planned: AWS deployment", []),
+    ("Built Machine Learning and Deep Learning models in Python.",     # skill names, not plans
+     ["Python", "Machine Learning", "Deep Learning"]),
+    ("Learning Python. Built a Flask app in Python.", ["Python", "Flask"]),   # also used for real
+])
+def test_future_work_is_not_a_skill(text, skills):
+    assert sorted(resume_skills_in_text(text, SKILL_LIST)) == sorted(skills)
+
+
+def test_future_span_ends_at_the_sentence():
+    text = "Wrote Java tools; future work: Docker. Used SQL daily."
+    [(start, end)] = future_spans(text)
+    assert text[start:end] == "future work: Docker"

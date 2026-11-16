@@ -253,3 +253,10 @@ def test_real_model_on_fixture(real_model, capsys):
     assert profile["name"] == "Marcus Oyelaran"
     assert profile["experience_years"] == 3.0
     assert "WARNING" not in capsys.readouterr().err
+
+
+def test_skill_entity_in_future_work_is_dropped():
+    text = "Ann Lee\nProject\n- Used Git and wrote a future roadmap for Docker support"
+    p = profile_from(text, [("Ann Lee", "PERSON"), ("Git", "SKILL"), ("Docker", "SKILL")],
+                     load_skills(SKILLS))
+    assert p["skills"] == ["Git"]

@@ -166,12 +166,33 @@ def extract_skills(text, skill_list):
     return found
 
 
+# PLANNED / FUTURE WORK is not a skill yet: "documented a future roadmap for
+# GUI development", "plan to learn Docker", "currently learning Python".
+# From one of these words to the end of the sentence/line is "future" text.
+# "learning" right after machine/deep/... is a skill name, not a plan.
+FUTURE_CUE = (r"\b(?:future|roadmap|plan(?:s|ned|ning)?(?:\s+to)?|to\s+learn|will\s+learn"
+              r"|(?<!machine\s)(?<!deep\s)(?<!reinforcement\s)(?<!supervised\s)"
+              r"(?<!transfer\s)(?<!e-)learning)\b")
+
+
+def future_spans(text):
+    """(start, end) character ranges of text about planned or future work."""
+    spans = []
+    for m in re.finditer(FUTURE_CUE, text, re.IGNORECASE):
+        end = re.search(r"[.;!?\n]", text[m.end():])
+        spans.append((m.start(), m.end() + end.start() if end else len(text)))
+    return spans
+
+
 def in_spans(position, spans):
     return any(s <= position < e for s, e in spans)
 
 
 def resume_skills_in_text(text, skill_list):
-    """extract_skills() for a RESUME."""
+    """extract_skills() for a RESUME: skills mentioned only as planned or
+    future work don't count (that text is blanked out first)."""
+    for s, e in future_spans(text):
+        text = text[:s] + " " * (e - s) + text[e:]
     return extract_skills(text, skill_list)
 
 
@@ -547,13 +568,14 @@ def build_profile_from_ner(ents, text, skill_list):
     # canonical skills.txt names it contains ("Java Programming" -> Java,
     # "Microsoft Excel" -> Excel, "Object-Oriented Programming" -> OOP).
     # Entities that link to nothing ("Kushtia", a place) are dropped, and so
-    # are entities inside a link.
+    # are entities inside a link or in planned/future work.
     # Step 2: every skills.txt skill found anywhere else in the text
     # (coursework, projects) is added. skill_sources says which step found it.
     links = [(m.start(), m.end()) for m in re.finditer(URL_PATTERN, text, re.IGNORECASE)]
+    future = future_spans(text)
     sources = {}
     for e in by_label("SKILL"):
-        if in_spans(e["start"], links):
+        if in_spans(e["start"], links) or in_spans(e["start"], future):
             continue
         for skill in extract_skills(e["text"], skill_list):
             sources.setdefault(skill, "ner")
