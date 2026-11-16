@@ -573,7 +573,8 @@ see the **Actions** tab on GitHub, or the ✓ / ✗ next to each commit.
 | `tests/test_parser_llm.py` | Agent 1 LLM parser: same format as rules, cleanup, every fallback case |
 | `tests/test_ner_data.py` | The annotated NER data: offsets match the text, spans on token boundaries, no overlaps, every label present, labeling rules followed, file matches the generator |
 | `tests/test_train_ner.py` | Train/test split, exact-match P/R/F1 on known cases, a 1-epoch training smoke run, the committed model's saved metrics |
-| `tests/test_parser_ner.py` | NER parser with a fake "perfect" model: same profile as rules on the 3 fixtures, Python date math, model mistakes filtered (fake dates, project roles, links), loud fallback when the model is missing, broken or crashes, pipeline default; plus the real committed model (F1 ≥ 0.90 on the hand-annotated resumes) |
+| `tests/test_parser_ner.py` | NER parser with a fake "perfect" model: same profile as rules on the 3 fixtures, skill entity linking (aliases, unknown skills dropped, text matches added), planned-work skills dropped, company recovered from "Company | Title", Python date math, model mistakes filtered (fake dates, project roles, links), loud fallback when the model is missing, broken or crashes, pipeline default; plus the real committed model (F1 ≥ 0.90 on the hand-annotated resumes) |
+| `tests/test_unseen_layouts.py` | The 3 fake resumes in unseen layouts are readable (the PDF really has two columns) and the checker's field comparison works |
 | `tests/test_job_synthesizer.py` | Requirement extraction, scoring, penalties, ranking (on the TF-IDF fallback), the optional LLM key points with a fake Groq: score unchanged, no contact details in the prompt, every fallback case |
 | `tests/test_keypoints.py` | Embedding key points: spaCy candidate phrases, the real KeyBERT on a fake embedding model, resume matching (by skill, by similarity, not at all), nice-to-haves, field building, no Groq calls by default, score unchanged, fallbacks, the KeyBERT-vs-Groq matching in `scripts/compare_key_points.py` |
 | `tests/test_embeddings.py` | Chunking, best-chunk similarity, the 0–40 mapping, scores not depending on other jobs, fallback |
@@ -618,6 +619,26 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
   so the model must be retrained (`python scripts/train_ner.py`).
 - **The future-work rule is word-based:** a real skill mentioned only in a
   sentence that also says "learning" or "plan" is dropped.
+- **Unseen layouts break it (not fixed yet).** `scripts/check_unseen_layouts.py`
+  runs 3 fake resumes the model never saw (`tests/fixtures/unseen/`): NER
+  gets **16/24** fields right, the rules 14/24. Skills and emails were right
+  in all three. What breaks:
+  - *Two-column PDF:* the PDF reader merges the columns line by line
+    ("Python, SQL, Docker Harborline Logistics | …"), so a skill becomes part
+    of a company name ("Docker Harborline Logistics"), the degree is cut at
+    the column break ("Associate of Science in"), the graduation date is
+    taken from the job next to it (Jan 2021 instead of May 2023), and the
+    hyphenated name is cut ("Jordan Okafor"). The model also tagged
+    "Copperfield Diner" as the job title, so the company recovery took
+    "Line Cook" as the company (title and company swapped).
+  - *No section headings:* the name was tagged ORG, so the "name" became
+    "Web Studio" (a PERSON tag inside "Lumen Web Studio"), and the first job
+    was lost because "Front-End Developer" was tagged ORG, not JOB_TITLE. The
+    rule-based parser finds no jobs or education at all without headings.
+  - *Season dates* ("Fall 2023 - Spring 2024"): the model tags them as DATE,
+    but the date math can't read seasons, so the job gets 0 months and the
+    graduation "Expected Spring 2026" is empty. The second job is missing:
+    "Software Lead" wasn't tagged as a job title.
 - **Layout still matters** for grouping entities into jobs and education
   (same line or neighbouring lines).
 - The trained model (15 MB) is committed in `models/resume_ner/`, so every
