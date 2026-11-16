@@ -269,6 +269,46 @@ def test_groq_failure_falls_back_to_embeddings(keybert, monkeypatch):
     assert ranked[0]["assessed_by"] == "embeddings"
 
 
+def where(skill, assessment):
+    """Which of key_points / nice_to_have / gaps list this skill on its own."""
+    return [field for field in ("key_points", "nice_to_have", "gaps")
+            if skill.lower() in {x.lower() for x in assessment[field]}]
+
+
+def test_each_skill_in_only_one_field():
+    # job-002: Git and GitHub are "preferred", Linux is required
+    job = JOBS["job-002"]
+    student = dict(STUDENT, skills=["Java", "C++"], raw_text="")
+    b = score_match(student, job)["breakdown"]
+    matches = [match("Summer internship"), match("GitHub"), match("Linux"),
+               match("performance-critical C++ services"), match("Data Structures"),
+               match("Bachelor")]
+    a = embedding_assessment(job, b, extract_requirements(job), matches, profile=student)
+    assert where("GitHub", a) == ["nice_to_have"]         # optional: not a key point, not a gap
+    assert where("Linux", a) == ["gaps"]                  # required and missing
+    assert where("Data Structures", a) == ["gaps"]
+    assert "performance-critical C++ services" in a["key_points"]   # more than a skill name: kept
+    assert a["key_points"][0] == "Summer internship"
+    assert len(a["gaps"]) == len({g.lower() for g in a["gaps"]})
+
+
+def test_degree_level_not_repeated_in_gaps():
+    job = JOBS["job-004"]                                   # asks for a Master's
+    student = dict(STUDENT, education={"degree": "Bachelor of Science in Computer Science"})
+    b = score_match(student, job)["breakdown"]
+    a = embedding_assessment(job, b, extract_requirements(job), [match("Master")], profile=student)
+    assert "Master" in a["key_points"]
+    assert [g for g in a["gaps"] if "Master" in g] == ["Master's degree"]
+
+
+def test_no_skill_duplicated_in_real_ranking(keybert):
+    for r in rank_jobs(STUDENT, list(JOBS.values())):
+        a = r["assessment"]
+        assert len(a["key_points"]) <= 6
+        for skill in load_skills(SKILLS_PATH):
+            assert len(where(skill, a)) <= 1, (r["id"], skill, where(skill, a))
+
+
 def test_comparison_script_matches_llm_points_to_phrases(fake_model):
     import sys
     sys.path.insert(0, os.path.join(ROOT, "scripts"))

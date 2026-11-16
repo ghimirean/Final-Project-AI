@@ -48,7 +48,8 @@ from datetime import date
 
 from resume_parser import load_skills, extract_skills, to_months
 from embeddings import embed, resume_job_similarities, EmbeddingError
-from keypoints import extract_keyphrases, is_evidence, match_phrases, resume_lines
+from keypoints import (KEYPOINT_CONFIG, content_words, extract_keyphrases, is_evidence,
+                       match_phrases, resume_lines)
 from llm import ask_llm, LLMError
 
 # OPTIONAL LLM key points (OFF by default: Agent 3 uses embeddings, and
@@ -536,6 +537,19 @@ def coverage(match, kind, description, have, education, skill_list):
     return False, None
 
 
+KEY_POINTS = KEYPOINT_CONFIG["top_n"]   # key points shown per job
+SPARE_PHRASES = 4                       # extra KeyBERT phrases, used when duplicates are dropped
+
+
+def unique(items):
+    seen, out = set(), []
+    for item in items:
+        if item.lower() not in seen:
+            seen.add(item.lower())
+            out.append(item)
+    return out
+
+
 def embedding_assessment(job, breakdown, req, matches, skill_list=None, profile=None):
     """Key points from KeyBERT phrases + embedding matches against the resume.
     matches: from keypoints.match_phrases(). Same fields as the other methods,
@@ -553,18 +567,32 @@ def embedding_assessment(job, breakdown, req, matches, skill_list=None, profile=
         checked.append({"phrase": m["phrase"], "kind": kind, "relevance": m["relevance"],
                         "resume_similarity": m["resume_similarity"],
                         "covered": covered, "evidence": evidence})
-    matches = checked
     nice = nice_to_have_skills(job["description"], req["skills"])
     missing = [s for s in breakdown["missing_skills"] if s not in nice]
+    listed = {s.lower() for s in nice + missing}       # skills already reported elsewhere
 
-    def mentions_missing_skill(phrase):
-        return any(s.lower() in phrase.lower() for s in missing)
+    def only_listed_skills(phrase):
+        # "GitHub", "Data Structures and Algorithms": nothing but skills that
+        # are already in nice_to_have or gaps
+        skills = extract_skills(phrase, skill_list)
+        if not skills or any(s.lower() not in listed for s in skills):
+            return False
+        rest = phrase
+        for s in skills:
+            rest = re.sub(re.escape(s), " ", rest, flags=re.IGNORECASE)
+        return not content_words(rest)
 
-    # Requirements the resume shows no sign of. Role descriptions never count,
-    # and a phrase that is just a missing skill again isn't repeated.
+    # NO DUPLICATES: each skill is in only one of key_points, nice_to_have, gaps
+    matches = [m for m in checked if not only_listed_skills(m["phrase"])][:KEY_POINTS]
+
+    # Gaps beyond the skill list. Role phrases are never gaps; skill phrases
+    # aren't either (their missing skills are already in gaps / nice_to_have);
+    # a degree level isn't repeated when the degree check already reports it.
+    degree_reported = breakdown.get("degree_penalty", 0) > 0
+    uncovered = [m["phrase"] for m in matches
+                 if not m["covered"] and (m["kind"] == "experience" or (
+                     m["kind"] == "degree" and not (degree_reported and extract_degree(m["phrase"]))))]
     requirements = [m for m in matches if m["kind"] != "role"]
-    uncovered = [m["phrase"] for m in requirements
-                 if not m["covered"] and not mentions_missing_skill(m["phrase"])]
     covered = [m for m in matches if m["covered"]]
 
     # Interview: probe up to 3 gaps first, then ask for examples of what the
@@ -584,7 +612,7 @@ def embedding_assessment(job, breakdown, req, matches, skill_list=None, profile=
         "required_skills": [s for s in req["skills"] if s not in nice],
         "nice_to_have": nice,
         "fit_summary": summary,
-        "gaps": missing + uncovered + requirement_gaps(req, breakdown),
+        "gaps": unique(missing + uncovered + requirement_gaps(req, breakdown)),
         "interview_focus": focus or [f"General fit for the {job['title']} role"],
         "key_point_matches": matches,
     }
@@ -604,7 +632,7 @@ class KeyPointer:
         req = extract_requirements(job, self.skill_list)
         if not self.broken:
             try:
-                phrases = extract_keyphrases(job["description"])
+                phrases = extract_keyphrases(job["description"], KEY_POINTS + SPARE_PHRASES)
                 if self.lines is None:
                     self.lines = resume_lines(resume_text(self.profile))
                     self.line_vectors = embed(self.lines) if self.lines else None

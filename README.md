@@ -375,7 +375,7 @@ or `"llm"` when the optional Groq key points are on.)
 
 | Field | How |
 |---|---|
-| `key_points` | the KeyBERT phrases, most relevant first |
+| `key_points` | the KeyBERT phrases, most relevant first. A phrase that is nothing but skills already listed in `nice_to_have` or `gaps` ("GitHub", "Linux") is dropped, so **each skill appears in only one of key_points / nice_to_have / gaps**; KeyBERT returns 4 spare phrases so 6 remain |
 | `required_skills` | the posting's skills from `data/skills.txt`, minus the nice-to-haves |
 | `nice_to_have` | skills in a sentence with "plus", "bonus", "preferred", "desired", … |
 | `fit_summary` | the one-line `reason` + "the resume shows K of N key points" |
