@@ -81,11 +81,16 @@ DEGREES = ["Bachelor of Science in Computer Science", "Bachelor of Science in In
            "Associate of Applied Science in Networking", "Master of Science in Computer Engineering",
            "B.S. in Software Engineering", "BSc Computer Engineering", "M.S. in Information Systems",
            "MBA"]
-SKILLS = ["Python", "Java", "JavaScript", "TypeScript", "C++", "C#", "SQL", "HTML", "CSS", "React",
-          "Node.js", "Django", "Flask", "Git", "Docker", "AWS", "Linux", "Excel", "Tableau", "Power BI",
-          "pandas", "NumPy", "scikit-learn", "TensorFlow", "PyTorch", "REST API", "Machine Learning",
-          "Kotlin", "Go", "Rust", "Swift", "Kubernetes", "PostgreSQL", "MongoDB", "Redis", "GraphQL",
-          "Spring Boot", "Figma", "Jira", "Terraform", "Flutter", "Bash", "Azure", "Spark"]
+# Every skill in data/skills.txt (the list Agent 3 matches job requirements
+# against), so the model sees each one labeled as a SKILL at least sometimes,
+# plus skills that are NOT in that list, so it also learns to find new ones.
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
+with open(os.path.join(ROOT, "data", "skills.txt"), encoding="utf-8") as _f:
+    LISTED_SKILLS = [line.strip() for line in _f if line.strip()]
+EXTRA_SKILLS = ["Kotlin", "Go", "Rust", "Swift", "Kubernetes", "PostgreSQL", "MongoDB", "Redis",
+                "GraphQL", "Spring Boot", "Figma", "Jira", "Terraform", "Flutter", "Bash", "Azure",
+                "Spark", "Microsoft Word"]
+SKILLS = LISTED_SKILLS + EXTRA_SKILLS
 PROJECTS = ["Campus Event Finder", "Budget Buddy", "Sales Trend Dashboard", "Line-Following Robot",
             "Library Checkout Analyzer", "Recipe Recommender", "Chess Engine", "Weather Alert Bot",
             "Parking Spot Tracker", "Study Group Matcher", "Inventory Forecaster", "Trail Map App"]
@@ -172,13 +177,24 @@ class Resume:
         self.b.newline()
 
     def skill_sentence(self, skills):
-        # "Built data pipelines with Python and SQL"
-        b = self.b
-        b.add(f"{self.rng.choice(VERBS)} {self.rng.choice(THINGS)} with ")
+        # A few sentence shapes, e.g. "Built data pipelines with Python and SQL",
+        # "Applied OOP principles to a scheduling tool", "Used Git and GitHub for ..."
+        rng, b = self.rng, self.b
+        shape = rng.randint(1, 3)
+        if shape == 1:
+            b.add(f"{rng.choice(VERBS)} {rng.choice(THINGS)} with ")
+        elif shape == 2:
+            b.add("Applied ")
+        else:
+            b.add("Used ")
         for i, skill in enumerate(skills):
             if i:
                 b.add(" and " if i == len(skills) - 1 else ", ")
             b.add(skill, "SKILL")
+        if shape == 2:
+            b.add(f" principles to {rng.choice(THINGS)}")
+        elif shape == 3:
+            b.add(f" to deliver {rng.choice(THINGS)}")
 
     # ---------- sections ----------
 
@@ -331,7 +347,8 @@ class Resume:
                     if i:
                         b.add(", ")
                     b.add(skill, "SKILL")
-                b.add(end)
+                # No final "." after a one-letter skill: spaCy reads "R." as one token
+                b.add(end if len(group[-1]) > 1 else "")
                 b.newline()
         if rng.random() < 0.4:               # spoken languages are NOT skills
             b.add(f"{'Spoken Languages' if style == 3 and names[0] == 'Languages' else 'Languages'}: "
