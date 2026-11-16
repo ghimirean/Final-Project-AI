@@ -1,12 +1,13 @@
 # INTERVAI
 
 A multi-agent AI mock interview platform. This README covers **Agent 1
-(Resume Parser)**, **Agent 3 (Job Description Synthesizer + Match Scoring)**
+(Resume Parser)**, **Agent 2 (Job Search)**, **Agent 3 (Job Description Synthesizer + Match Scoring)**
 and the **pipeline / API** that connects them to the HITL dashboard and Agent 4.
 
 | Agent | Model | What the model does | Fallback |
 |---|---|---|---|
 | Agent 1 | Gemini `gemini-3.5-flash` | Reads the resume: contact info, skills, education, jobs, projects | Rule-based parser |
+| Agent 2 | Groq `llama-3.3-70b-versatile` | Decides which job searches to run and searches again if results are weak | Rule-based query from the profile |
 | Agent 3 | Groq `qwen/qwen3.8-27b` | Key points per job: what the employer wants, fit, gaps, interview topics | Rule-based key points |
 | Agent 3 | local `all-MiniLM-L6-v2` (sentence-transformers) | Embeddings for the text-similarity part of the score | TF-IDF |
 
@@ -23,6 +24,20 @@ pip install -r requirements.txt
 cp .env.example .env        # then put your API keys in .env (never commit it)
 ```
 
+Your `.env` needs three keys (the empty template is in `.env.example`):
+
+| Key | Used by |
+|---|---|
+| `GEMINI_API_KEY` | Agent 1 (resume parser) |
+| `GROQ_API_KEY` | Agents 2 and 3 |
+| `RAPIDAPI_KEY` | Agent 2 (job search) |
+
+For `RAPIDAPI_KEY`, create a RapidAPI account, subscribe to the free BASIC
+plan of the JSearch API (200 requests a month, no credit card), and copy
+the key from the API's Code Snippets panel. Write it in `.env` as
+`RAPIDAPI_KEY=your_key`, with no quotes. Without it, Agent 2 can't fetch
+jobs and `/search` returns an error.
+
 Run every command below from the project root.
 
 ### LLM setup (`agents/llm.py`)
@@ -34,7 +49,7 @@ Every agent calls an LLM through one shared helper,
   read from `.env` with python-dotenv. Keys are never printed or committed.
 - **Per-agent model:** each agent sets its provider and model in one
   `LLM_CONFIG` dict at the top of its file, so switching models is a
-  one-line change. Agent 1 uses `{"provider": "gemini", "model": "gemini-3.5-flash"}`,
+  one-line change. Agent 1 uses `{"provider": "gemini", "model": "gemini-3.5-flash"}`, Agent 2 uses `{"provider": "groq", "model": "llama-3.3-70b-versatile"}`,
   Agent 3 uses `{"provider": "groq", "model": "qwen/qwen3.8-27b"}`.
 - **Validated JSON:** pass a pydantic model as `schema` and the reply is
   parsed as JSON and checked against it. Any problem (missing key, network
@@ -148,6 +163,87 @@ LLM's advantage is on layouts the rules don't handle (see Known limitations).
 `parsed_by` is `"llm"` or `"rules"`, so you can always tell which path produced a profile.
 `raw_text` is saved in the file (Agent 3 needs it) but left out of the
 printout and out of the pipeline/API result.
+
+---
+
+## Agent 2 — Job Search Agent (`agents/job_search_agent.py`)
+
+Finds job postings that fit a parsed profile. Agent 2 is an **LLM agent
+(Groq) with a rule-based fallback**. It returns jobs in the exact format
+Agent 3 and `run_pipeline()` expect: `{id, title, company, location, url,
+description}`, all strings.
+
+| File | Role |
+|---|---|
+| `agents/job_search_agent.py` | The AI agent: decides which searches to run and when to stop |
+| `agents/job_search.py` | Non-AI toolkit the agent calls: job format, provider interface, cleaning, dedupe, rule-based `build_query` |
+| `agents/jsearch_provider.py` | Real job source: JSearch on RapidAPI (`/search-v2`) |
+
+### How the agent works
+
+`run_job_agent(profile, provider, location="", limit=20)` runs our own loop
+(no agent frameworks):
+
+1. **Reason.** The LLM gets a summary of the profile (skills, recent titles,
+   years, projects) and the searches so far, and replies with JSON:
+   `search` with a query, or `finish`.
+2. **Act.** The loop cleans the query (dedupes and caps keywords, keeps the
+   caller's location, fixes a bad experience level), skips repeats, and runs
+   `search_jobs()` as the tool.
+3. **Observe.** The LLM is shown a short summary of the results (counts and
+   up to 5 job titles with companies, never full descriptions) and decides
+   whether to search again. If results are weak it tries a different query.
+4. It stops when the LLM finishes, the job limit is reached, or after
+   `MAX_STEPS` (4) steps. Jobs from all searches are merged without
+   duplicates.
+
+**The LLM never sees contact details or resume text**: only skills, job
+titles, years of experience and project names and skills.
+
+**Fallback:** if the LLM fails at the first step (missing key, API down, bad
+JSON) or finishes without searching, Agent 2 runs one search with the
+rule-based `build_query(profile)`. The result's `mode` is `"llm"` or
+`"rules"`, so you can tell which path ran.
+
+### Job source: JSearch
+
+`JSearchProvider` sends one request per search to JSearch's `/search-v2`
+endpoint and returns up to 10 jobs. Setup:
+
+1. Subscribe to the free BASIC plan of JSearch on RapidAPI (200 requests a
+   month, no credit card).
+2. Put your key in `.env` as `RAPIDAPI_KEY=...` (see `.env.example`).
+
+The query text is the job title plus at most 2 keywords plus the location
+(for example `Software Developer Java Python in Baltimore, MD`), because
+longer queries returned no results in our tests. Failures (missing key,
+rejected key, quota reached, HTTP or network errors, bad JSON) raise one
+error type, `ProviderError`, and messages never contain the key. Other
+sources can be added by subclassing `JobProvider`.
+
+**Result format**
+```python
+result = run_job_agent(profile, JSearchProvider(), location="Baltimore, MD")
+result["jobs"]    # [{id, title, company, location, url, description}, ...]
+result["trace"]   # each step: thought, action, query, returned, new
+result["mode"]    # "llm" or "rules"
+```
+
+### Run it (via the API)
+
+```bash
+uvicorn api:app --reload
+curl -X POST http://127.0.0.1:8000/search \
+     -F "resume=@data/sample.pdf" \
+     -F "location=Baltimore, MD"
+```
+`POST /search` takes a `.pdf`/`.docx` resume, an optional `location` and a
+`limit` (1 to 50, default 20). Agent 1 parses the resume, then Agent 2
+searches. It returns `{"profile", "jobs", "search_mode", "trace"}`. The
+`jobs` list can be passed straight to `/rank`. HTTP 400 means a bad file type
+or limit. HTTP 502 means the job source failed (check `RAPIDAPI_KEY` and the
+monthly quota). If a search finds nothing, `jobs` is an empty list, and
+`/rank` rejects an empty list, so check it first.
 
 ---
 
@@ -348,6 +444,8 @@ uvicorn api:app --reload
 ```
 `POST /rank` takes a multipart form with `resume` (a `.pdf`/`.docx` file) and
 `jobs` (a JSON list as text), and returns `{"profile": ..., "ranked_jobs": [...]}`.
+
+`POST /search` (Agent 2) finds jobs for a resume, and its jobs result can be sent to `/rank`.
 ```bash
 curl -X POST http://127.0.0.1:8000/rank \
      -F "resume=@data/sample.pdf" \
@@ -373,8 +471,11 @@ python -m pytest -v
 | `tests/test_job_synthesizer.py` | Requirement extraction, scoring, penalties, ranking (on the TF-IDF fallback), LLM key points with a fake Groq: score unchanged, no contact details in the prompt, every fallback case |
 | `tests/test_embeddings.py` | Chunking, best-chunk similarity, the 0–40 mapping, scores not depending on other jobs, fallback |
 | `tests/test_pipeline.py` | `run_pipeline` and the `/rank` endpoint (FastAPI `TestClient`) |
+| `tests/test_job_search_agent.py` | Agent 2 loop with a scripted fake LLM: search/finish, merging, repeat queries, step and job limits, rule-based fallback, provider errors, prompt contains no contact details, query cleaning |
+| `tests/test_jsearch_provider.py` | JSearch provider with a fake HTTP call: request building, result parsing, error cases, key never in error messages |
+| `tests/test_search_endpoint.py` | `POST /search`: success, fallback, empty results, bad input, 502 on job source failure |
 
-**Tests never call a real LLM or load the real embedding model.**
+**Tests never call a real LLM, job site, or load the real embedding model.**
 `tests/conftest.py` blocks the network function in `agents/llm.py` and the
 model loader in `agents/embeddings.py` for every test. Tests that need a
 reply or an embedding install a fake one. The suite runs offline, without
@@ -420,6 +521,26 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
 - **No OCR.** Scanned or image-only PDFs give no text.
 - Overlapping jobs are added together, and year-only dates are approximated
   (start = January, end = December).
+
+  **Agent 2, job search**
+- **Quota:** the free JSearch plan has 200 requests a month, and each
+  search costs one. One `/search` call uses 1 to 4.
+- **Short queries only:** the query is the title plus 2 keywords, so a long
+  skills list can't all be searched in one query. The agent can try different
+  pairs across its steps, and Agent 3 ranks with the full resume.
+- **Location:** the location you pass always wins, and the agent can't widen
+  it. Small markets can return very few jobs (one test returned 1), so try a
+  bigger city or leave it blank.
+- **Rule-based fallback title:** it uses the first experience entry's title,
+  which can be an odd title (for example "Student Webmaster") that returns
+  nothing.
+- **Search quality varies:** the LLM can pick poor queries, and output can
+  differ between runs. Job titles and companies shown to the LLM are data
+  from outside, so job postings could contain instructions aimed at the model.
+- **Aggregated postings:** JSearch collects postings from other boards, so
+  some may be stale or duplicated. Descriptions are full text, which Agent 3
+  needs.
+- **No experience-level filter:** the profile's level is not sent to JSearch.
 
 **Agent 3, key points (LLM)**
 - **Groq free-tier rate limit:** `qwen/qwen3.8-27b` allows 1,000 output

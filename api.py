@@ -1,4 +1,4 @@
-"""Small web API around the Agent 1 + Agent 3 pipeline.
+"""Small web API around the Agent 1, 2 & 3 pipeline.
 
 Start it from the project root:
     uvicorn api:app --reload
