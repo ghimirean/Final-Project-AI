@@ -146,6 +146,51 @@ def test_search_rejects_bad_limit(monkeypatch, limit):
     assert "limit" in response.json()["detail"]
 
 
+@pytest.mark.parametrize("max_steps", ["0", "5"])
+def test_search_rejects_bad_max_steps(monkeypatch, max_steps):
+    response = post_search(monkeypatch, FakeProvider(), max_steps=max_steps)
+    assert response.status_code == 400
+    assert "max_steps" in response.json()["detail"]
+
+
+# ---------- max_steps ----------
+
+def spy_agent(monkeypatch):
+    """Replaces run_job_agent in api.py and records its keyword arguments."""
+    seen = {}
+
+    def fake(profile, provider, **kwargs):
+        seen.update(kwargs)
+        return {"jobs": [], "trace": [], "mode": "llm"}
+
+    monkeypatch.setattr(api, "run_job_agent", fake)
+    return seen
+
+
+def test_search_max_steps_defaults_to_4(monkeypatch):
+    seen = spy_agent(monkeypatch)
+    response = post_search(monkeypatch, FakeProvider())
+    assert response.status_code == 200
+    assert seen["max_steps"] == agent.MAX_STEPS == 4
+
+
+def test_search_passes_max_steps_to_agent(monkeypatch):
+    seen = spy_agent(monkeypatch)
+    response = post_search(monkeypatch, FakeProvider(), max_steps="2")
+    assert response.status_code == 200
+    assert seen["max_steps"] == 2
+
+
+def test_search_max_steps_limits_searches(monkeypatch):
+    # The LLM keeps searching, but with max_steps=1 only one search runs
+    script(monkeypatch, SEARCH, SEARCH, SEARCH, SEARCH)
+    provider = FakeProvider([raw_job(1)], [raw_job(2)])
+    response = post_search(monkeypatch, provider, max_steps="1")
+    assert response.status_code == 200
+    assert len(provider.queries) == 1
+    assert len(response.json()["jobs"]) == 1
+
+
 # ---------- job source failures ----------
 
 def test_provider_error_on_rule_fallback_gives_502(monkeypatch):

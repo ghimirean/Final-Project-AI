@@ -17,7 +17,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents"))
 from pipeline import run_pipeline  # noqa: E402
-from job_search_agent import run_job_agent  # noqa: E402
+from job_search_agent import MAX_STEPS, run_job_agent  # noqa: E402
 from job_synthesizer import SKILLS_PATH  # noqa: E402
 from jsearch_provider import JSearchProvider, ProviderError  # noqa: E402
 from resume_parser import parse_resume_ner  # noqa: E402
@@ -56,9 +56,11 @@ async def rank(resume: UploadFile = File(...), jobs: str = Form(...)):
 
 @app.post("/search")
 async def search(resume: UploadFile = File(...), location: str = Form(""),
-                 limit: int = Form(20)):
+                 limit: int = Form(20), max_steps: int = Form(MAX_STEPS)):
     """resume: a .pdf or .docx file. location: optional city/state text.
     limit: most jobs to return (1 to 50, default 20).
+    max_steps: most agent steps, each at most one JSearch request
+    (1 to 4, default 4). Lower it to save the monthly quota.
     Agent 1 (the NER parser) parses the resume, then Agent 2 (an LLM agent)
     searches for jobs.
     Returns {"profile": ..., "jobs": [...], "search_mode": "llm" or "rules",
@@ -70,6 +72,8 @@ async def search(resume: UploadFile = File(...), location: str = Form(""),
         raise HTTPException(400, f"resume must be .pdf or .docx, got '{ext or 'no extension'}'")
     if not 1 <= limit <= MAX_SEARCH_LIMIT:
         raise HTTPException(400, f"limit must be between 1 and {MAX_SEARCH_LIMIT}")
+    if not 1 <= max_steps <= MAX_STEPS:
+        raise HTTPException(400, f"max_steps must be between 1 and {MAX_STEPS}")
 
     # Same temp-file handling as /rank: the parser needs a path, and the
     # resume (personal data) is deleted as soon as it has been parsed.
@@ -82,7 +86,8 @@ async def search(resume: UploadFile = File(...), location: str = Form(""),
         os.remove(tmp_path)
 
     try:
-        result = run_job_agent(profile, JSearchProvider(), location=location, limit=limit)
+        result = run_job_agent(profile, JSearchProvider(), location=location,
+                               limit=limit, max_steps=max_steps)
     except ProviderError as e:              # job source failed on the rule-based fallback
         raise HTTPException(502, str(e))
     if not result["jobs"] and any("search_error" in step for step in result["trace"]):
