@@ -15,7 +15,7 @@ import pytest
 
 import resume_parser
 from resume_parser import (
-    NER_CONFIG, NERUnavailable, build_profile_from_ner, load_skills, ner_entities,
+    NER_CONFIG, NERUnavailable, build_profile_from_ner, company_from_line, load_skills, ner_entities,
     non_job_lines, parse_date, parse_resume, parse_resume_ner,
 )
 from pipeline import run_pipeline
@@ -260,3 +260,21 @@ def test_skill_entity_in_future_work_is_dropped():
     p = profile_from(text, [("Ann Lee", "PERSON"), ("Git", "SKILL"), ("Docker", "SKILL")],
                      load_skills(SKILLS))
     assert p["skills"] == ["Git"]
+
+
+@pytest.mark.parametrize("line, title, company", [
+    ("Chick-fil-A | Team Member (Cashier) Aug 2024 – Present", "Team Member (Cashier)", "Chick-fil-A"),
+    ("Team Member | Chick-fil-A | 2023 - 2024", "Team Member", "Chick-fil-A"),
+    ("Team Member, Aug 2024 - Present", "Team Member", None),            # no "|": unknown
+])
+def test_company_from_line(line, title, company):
+    assert company_from_line(line, title) == company
+
+
+def test_missing_company_recovered_from_title_line():
+    # The model found the title but not "Chick-fil-A" (it really missed it)
+    text = "Ann Lee\nEXPERIENCE\nChick-fil-A | Team Member (Cashier)\nAug 2024 – Dec 2024"
+    p = profile_from(text, [("Ann Lee", "PERSON"), ("Team Member (Cashier)", "JOB_TITLE"),
+                            ("Aug 2024", "DATE"), ("Dec 2024", "DATE")], [])
+    assert p["experience"] == [{"company": "Chick-fil-A", "title": "Team Member (Cashier)",
+                                "dates": "Aug 2024 – Dec 2024", "months": 5}]

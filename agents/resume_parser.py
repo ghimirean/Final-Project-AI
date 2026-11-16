@@ -553,6 +553,21 @@ def non_job_lines(text):
     return lines
 
 
+def company_from_line(line, title):
+    """Rule-based fallback when NER finds a job title but no company: split
+    the title's line like the rule-based parser does ("Company | Title") and
+    take the part that isn't the title, without its dates. The model misses
+    some names it never saw in training, e.g. "Chick-fil-A | Team Member (Cashier)"."""
+    if "|" not in line:
+        return None
+    for part in line.split("|"):
+        part = re.sub(DATE_RANGE, "", part, flags=re.IGNORECASE)
+        part = re.sub(DATE, "", part, flags=re.IGNORECASE).strip(" ,–—-\t")
+        if part and title.lower() not in part.lower():
+            return part
+    return None
+
+
 def build_profile_from_ner(ents, text, skill_list):
     """Turns NER entities into the exact parse_resume() format.
     The model finds the pieces; layout groups them; Python does the math."""
@@ -613,6 +628,7 @@ def build_profile_from_ner(ents, text, skill_list):
     # Company = ORG on the same line, else the line above/below.
     # Dates = the first two real dates from the title's line to 2 lines below.
     skip = non_job_lines(text) | education_lines
+    text_lines = text.split("\n")
     title_lines = sorted({e["line"] for e in by_label("JOB_TITLE") if e["line"] not in skip})
     used_orgs, jobs = set(), []
     for n, line in enumerate(title_lines):
@@ -627,8 +643,9 @@ def build_profile_from_ner(ents, text, skill_list):
             used_orgs.add(company["start"])
         dates = [e for e in by_label("DATE") if line <= e["line"] <= line + 2
                  and e["line"] < next_title and parse_date(e["text"]) is not None]
-        job = {"company": company["text"] if company else None, "title": title["text"],
-               "dates": None, "months": 0}
+        company_name = (company["text"] if company
+                        else company_from_line(text_lines[line], title["text"]))
+        job = {"company": company_name, "title": title["text"], "dates": None, "months": 0}
         if len(dates) >= 2:
             start, end = parse_date(dates[0]["text"]), parse_date(dates[1]["text"], is_end=True)
             if end >= start:
