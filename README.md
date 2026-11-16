@@ -78,9 +78,20 @@ entities of given types. Ours recognizes six types:
 2. Run the trained model to get the entities.
 3. Assemble them by layout:
    - name = first `PERSON`
-   - skills = every `SKILL` outside a link, spelled like `skills.txt` when listed there; new skills are kept too
+   - skills, by **entity linking**: each `SKILL` entity is mapped to the
+     canonical `skills.txt` names it contains ("Java Programming" → Java,
+     "Microsoft Excel" → Excel, "Object-Oriented Programming" → OOP; other
+     spellings live in `data/skill_aliases.txt`). Entities that link to no
+     known skill ("Kushtia", a place) are dropped, and duplicates removed.
+     Then every `skills.txt` skill found anywhere else in the text
+     (coursework, projects) is added, so "Analysis of Algorithms" gives
+     Algorithms. `skill_sources` records `"ner"` or `"text"` for each skill.
+   - **planned work isn't a skill:** a skill that only appears after "future",
+     "roadmap", "plan(s/ned) to", "to learn" or "learning" in its sentence
+     ("documented a future roadmap for GUI development") is ignored.
+     "Machine/Deep Learning" are skill names, not plans.
    - education = first `DEGREE`, the `ORG` up to 2 lines above or 1 below it, and the nearest date
-   - jobs = one per line with a `JOB_TITLE`, with the `ORG` on the same or a neighbouring line and the next two real dates (job titles inside Projects, Leadership or Awards sections are ignored)
+   - jobs = one per line with a `JOB_TITLE`, with the `ORG` on the same or a neighbouring line and the next two real dates (job titles inside Projects, Leadership or Awards sections are ignored). If the model finds a title but no company, the title's line is split like the rule-based parser does, first part = company, second = title ("Chick-fil-A | Team Member (Cashier)"). This also fixes lines where the model tagged both halves as titles ("Quillstone Media | Web Developer")
 4. **Python does the date math**, exactly as in the other parsers. `DATE`
    entities that aren't real dates (the model sometimes tags "weekly" or
    "three years") are skipped.
@@ -209,7 +220,7 @@ skills, education, jobs, years, projects) each pair agrees on. Our run:
 | `resume_title_case.docx` | Gemini misses **Excel** (only in a job bullet); rules and NER find it |
 | `resume_numeric_dates.docx` | all three agree on every field |
 | `resume_comma_skills.docx` | NER splits the hyphenated name ("Elena Vasquez" + "Moreau" as a skill) and puts the company in the title slot for the first job |
-| `data/sample.pdf` | NER misses the company "Chick-fil-A", adds a place name and a course name as skills, and keeps "Microsoft Excel" whole; Gemini adds "Word"; jobs, months and education agree |
+| `data/sample.pdf` | (before entity linking and company recovery) NER missed the company "Chick-fil-A", added a place name and a course name as skills, and kept "Microsoft Excel" whole; Gemini adds "Word"; jobs, months and education agree |
 
 | Pair | Fields that agree (of 32) |
 |---|---|
@@ -562,7 +573,8 @@ see the **Actions** tab on GitHub, or the ✓ / ✗ next to each commit.
 | `tests/test_parser_llm.py` | Agent 1 LLM parser: same format as rules, cleanup, every fallback case |
 | `tests/test_ner_data.py` | The annotated NER data: offsets match the text, spans on token boundaries, no overlaps, every label present, labeling rules followed, file matches the generator |
 | `tests/test_train_ner.py` | Train/test split, exact-match P/R/F1 on known cases, a 1-epoch training smoke run, the committed model's saved metrics |
-| `tests/test_parser_ner.py` | NER parser with a fake "perfect" model: same profile as rules on the 3 fixtures, Python date math, model mistakes filtered (fake dates, project roles, links), loud fallback when the model is missing, broken or crashes, pipeline default; plus the real committed model (F1 ≥ 0.90 on the hand-annotated resumes) |
+| `tests/test_parser_ner.py` | NER parser with a fake "perfect" model: same profile as rules on the 3 fixtures, skill entity linking (aliases, unknown skills dropped, text matches added), planned-work skills dropped, company recovered from "Company | Title", Python date math, model mistakes filtered (fake dates, project roles, links), loud fallback when the model is missing, broken or crashes, pipeline default; plus the real committed model (F1 ≥ 0.90 on the hand-annotated resumes) |
+| `tests/test_unseen_layouts.py` | The 3 fake resumes in unseen layouts are readable (the PDF really has two columns) and the checker's field comparison works |
 | `tests/test_job_synthesizer.py` | Requirement extraction, scoring, penalties, ranking (on the TF-IDF fallback), the optional LLM key points with a fake Groq: score unchanged, no contact details in the prompt, every fallback case |
 | `tests/test_keypoints.py` | Embedding key points: spaCy candidate phrases, the real KeyBERT on a fake embedding model, resume matching (by skill, by similarity, not at all), nice-to-haves, field building, no Groq calls by default, score unchanged, fallbacks, the KeyBERT-vs-Groq matching in `scripts/compare_key_points.py` |
 | `tests/test_embeddings.py` | Chunking, best-chunk similarity, the 0–40 mapping, scores not depending on other jobs, fallback |
@@ -595,12 +607,38 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
   size (30 → 60 resumes), and the extra sections (coursework, languages,
   leadership) were added after looking at how the model failed on
   `data/sample.pdf`. Treat 0.942 as optimistic for real resumes.
-- **Known mistakes:** hyphenated names split, hyphenated brand names
+- **Known model mistakes:** hyphenated names split, hyphenated brand names
   ("Chick-fil-A") not seen as companies, place names or course names
   tagged as skills, a company and a job title swapped in unfamiliar layouts.
-- **Course names aren't skills by our labeling rules,** so a skill that
-  appears only in "Relevant Coursework" (e.g. "Algorithms") isn't counted.
-  That lowers Agent 3 scores compared to the rules (90 vs 100 on sample.pdf).
+  Entity linking now drops skill entities that aren't known skills, the
+  "Company | Title" split recovers a missed company or a company tagged as a
+  title, and coursework skills come from the text match, so on sample.pdf and
+  the 3 fixtures these no longer reach the profile (every job is right).
+- **Only skills in `skills.txt` are kept.** Linking drops anything else,
+  including real skills that aren't on the list ("Word", "Kubernetes").
+  Adding a skill to `skills.txt` changes the NER training data generator,
+  so the model must be retrained (`python scripts/train_ner.py`).
+- **The future-work rule is word-based:** a real skill mentioned only in a
+  sentence that also says "learning" or "plan" is dropped.
+- **Unseen layouts break it (not fixed yet).** `scripts/check_unseen_layouts.py`
+  runs 3 fake resumes the model never saw (`tests/fixtures/unseen/`): NER
+  gets **16/24** fields right, the rules 14/24. Skills and emails were right
+  in all three. What breaks:
+  - *Two-column PDF:* the PDF reader merges the columns line by line
+    ("Python, SQL, Docker Harborline Logistics | …"), so a skill becomes part
+    of a company name ("Docker Harborline Logistics"), the degree is cut at
+    the column break ("Associate of Science in"), the graduation date is
+    taken from the job next to it (Jan 2021 instead of May 2023), and the
+    hyphenated name is cut ("Jordan Okafor"), and the other column's
+    heading sticks to a company ("EDUCATION Copperfield Diner").
+  - *No section headings:* the name was tagged ORG, so the "name" became
+    "Web Studio" (a PERSON tag inside "Lumen Web Studio"), and the first job
+    was lost because "Front-End Developer" was tagged ORG, not JOB_TITLE. The
+    rule-based parser finds no jobs or education at all without headings.
+  - *Season dates* ("Fall 2023 - Spring 2024"): the model tags them as DATE,
+    but the date math can't read seasons, so the job gets 0 months and the
+    graduation "Expected Spring 2026" is empty. The second job is missing:
+    "Software Lead" wasn't tagged as a job title.
 - **Layout still matters** for grouping entities into jobs and education
   (same line or neighbouring lines).
 - The trained model (15 MB) is committed in `models/resume_ner/`, so every

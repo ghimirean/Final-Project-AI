@@ -117,18 +117,83 @@ URL_PATTERN = (r"(?:\b[A-Za-z]+:\s*)?"
 def remove_urls(text):
     return re.sub(URL_PATTERN, " ", text, flags=re.IGNORECASE)
 
+SKILL_ALIASES_PATH = os.path.join(ROOT, "data", "skill_aliases.txt")
+_aliases = None
+
+
+def skill_aliases():
+    """{alias as written: canonical name} from data/skill_aliases.txt.
+    The spelling is kept, because short aliases ("ML") match exact case."""
+    global _aliases
+    if _aliases is None:
+        _aliases = {}
+        if os.path.exists(SKILL_ALIASES_PATH):
+            with open(SKILL_ALIASES_PATH, encoding="utf-8") as f:
+                for line in f:
+                    if "=" in line and not line.lstrip().startswith("#"):
+                        alias, canonical = (p.strip() for p in line.split("=", 1))
+                        _aliases[alias] = canonical
+    return _aliases
+
+
+def canonical_skill(name):
+    # "Microsoft Excel" -> "Excel", "Object-Oriented Programming" -> "OOP"
+    lookup = {alias.lower(): canonical for alias, canonical in skill_aliases().items()}
+    return lookup.get(name.lower(), name)
+
+
+def _skill_found(name, text):
+    # Match as a whole word, so "Java" doesn't match "JavaScript".
+    # Short names like "C", "R" or "ML" must match exact case.
+    pattern = r"(?<![\w+#])" + re.escape(name) + r"(?![\w+#])"
+    return re.search(pattern, text, 0 if len(name) <= 2 else re.IGNORECASE)
+
+
 def extract_skills(text, skill_list):
+    """Skills from skill_list found in the text, by canonical name
+    ("MS Excel" -> "Excel"), each once. A skill's aliases count as the skill."""
     # Drop links first so "github.com/me" doesn't count as the skill "GitHub"
     text = remove_urls(text)
+    aliases = skill_aliases()
     found = []
     for skill in skill_list:
-        # Match the skill as a whole word, so "Java" doesn't match "JavaScript"
-        pattern = r"(?<![\w+#])" + re.escape(skill) + r"(?![\w+#])"
-        # Short skills like "C" or "R" must match exact case
-        flags = 0 if len(skill) <= 2 else re.IGNORECASE
-        if re.search(pattern, text, flags):
-            found.append(skill)
+        canonical = canonical_skill(skill)
+        if canonical in found:
+            continue
+        names = [skill] + [a for a, c in aliases.items() if c == canonical]
+        if any(_skill_found(name, text) for name in names):
+            found.append(canonical)
     return found
+
+
+# PLANNED / FUTURE WORK is not a skill yet: "documented a future roadmap for
+# GUI development", "plan to learn Docker", "currently learning Python".
+# From one of these words to the end of the sentence/line is "future" text.
+# "learning" right after machine/deep/... is a skill name, not a plan.
+FUTURE_CUE = (r"\b(?:future|roadmap|plan(?:s|ned|ning)?(?:\s+to)?|to\s+learn|will\s+learn"
+              r"|(?<!machine\s)(?<!deep\s)(?<!reinforcement\s)(?<!supervised\s)"
+              r"(?<!transfer\s)(?<!e-)learning)\b")
+
+
+def future_spans(text):
+    """(start, end) character ranges of text about planned or future work."""
+    spans = []
+    for m in re.finditer(FUTURE_CUE, text, re.IGNORECASE):
+        end = re.search(r"[.;!?\n]", text[m.end():])
+        spans.append((m.start(), m.end() + end.start() if end else len(text)))
+    return spans
+
+
+def in_spans(position, spans):
+    return any(s <= position < e for s, e in spans)
+
+
+def resume_skills_in_text(text, skill_list):
+    """extract_skills() for a RESUME: skills mentioned only as planned or
+    future work don't count (that text is blanked out first)."""
+    for s, e in future_spans(text):
+        text = text[:s] + " " * (e - s) + text[e:]
+    return extract_skills(text, skill_list)
 
 
 def get_section(sections, keyword):
@@ -223,7 +288,7 @@ def extract_projects(lines, skill_list):
     def finish():
         if projects:
             projects[-1]["summary"] = bullets[0] if bullets else None
-            projects[-1]["skills"] = extract_skills("\n".join(body), skill_list)
+            projects[-1]["skills"] = resume_skills_in_text("\n".join(body), skill_list)
 
     for i, line in enumerate(lines):
         if is_project_header(lines, i):
@@ -255,7 +320,8 @@ def parse_resume(path, skills_path="data/skills.txt"):
     sections = split_sections(text)
     profile = extract_contact(sections.get("HEADER", []))
     skill_list = load_skills(skills_path)
-    profile["skills"] = extract_skills(text, skill_list)
+    profile["skills"] = resume_skills_in_text(text, skill_list)
+    profile["skill_sources"] = {s: "rules" for s in profile["skills"]}
     profile["education"] = extract_education(get_section(sections, "EDUCATION"))
     jobs, years = extract_experience(get_section(sections, "EXPERIENCE"))
     profile["experience"] = jobs
@@ -366,7 +432,8 @@ def build_profile_from_llm(data, text, skill_list):
     def clean_skills(names):
         cleaned = []
         for s in names:
-            s = canonical.get(s.strip().lower(), s.strip())   # "python" -> "Python"
+            s = canonical_skill(s.strip())                     # "MS Excel" -> "Excel"
+            s = canonical.get(s.lower(), s)                    # "python" -> "Python"
             if s and s not in cleaned:
                 cleaned.append(s)
         return cleaned
@@ -391,6 +458,7 @@ def build_profile_from_llm(data, text, skill_list):
         "linkedin": clean_link(data["linkedin"]),
         "github": clean_link(data["github"]),
         "skills": skills,
+        "skill_sources": {s: "llm" for s in skills},
         "education": data["education"],
         "experience": jobs,
         "experience_years": round(sum(j["months"] for j in jobs) / 12, 1),
@@ -485,6 +553,25 @@ def non_job_lines(text):
     return lines
 
 
+def company_from_line(line, title):
+    """Rule-based fallback when NER finds a job title but no company.
+    Returns (company, title). The title's line is split exactly like the
+    rule-based parser does: "Company | Title" (dates removed). The model
+    misses some names it never saw ("Chick-fil-A | Team Member (Cashier)"),
+    and sometimes tags BOTH halves as titles ("Quillstone Media | Web
+    Developer"), so the split decides both fields, as long as the NER title
+    is one of the two parts. Otherwise: (None, NER title)."""
+    parts = []
+    for part in line.split("|"):
+        part = re.sub(DATE_RANGE, "", part, flags=re.IGNORECASE)
+        part = re.sub(DATE, "", part, flags=re.IGNORECASE).strip(" ,–—-\t")
+        if part:
+            parts.append(part)
+    if len(parts) >= 2 and any(title.lower() in p.lower() for p in parts[:2]):
+        return parts[0], parts[1]
+    return None, title
+
+
 def build_profile_from_ner(ents, text, skill_list):
     """Turns NER entities into the exact parse_resume() format.
     The model finds the pieces; layout groups them; Python does the math."""
@@ -496,16 +583,24 @@ def build_profile_from_ner(ents, text, skill_list):
     name = persons[0]["text"] if persons else profile["name"]
     profile["name"] = name.title() if name and name.isupper() else name
 
-    # Skills: every SKILL entity outside a link, spelled like skills.txt when listed there
-    canonical = {s.lower(): s for s in skill_list}
+    # Skills, step 1 = ENTITY LINKING: each SKILL entity is linked to the
+    # canonical skills.txt names it contains ("Java Programming" -> Java,
+    # "Microsoft Excel" -> Excel, "Object-Oriented Programming" -> OOP).
+    # Entities that link to nothing ("Kushtia", a place) are dropped, and so
+    # are entities inside a link or in planned/future work.
+    # Step 2: every skills.txt skill found anywhere else in the text
+    # (coursework, projects) is added. skill_sources says which step found it.
     links = [(m.start(), m.end()) for m in re.finditer(URL_PATTERN, text, re.IGNORECASE)]
-    skills = []
+    future = future_spans(text)
+    sources = {}
     for e in by_label("SKILL"):
-        if any(s <= e["start"] < t for s, t in links):
+        if in_spans(e["start"], links) or in_spans(e["start"], future):
             continue
-        skill = canonical.get(e["text"].lower(), e["text"])
-        if skill not in skills:
-            skills.append(skill)
+        for skill in extract_skills(e["text"], skill_list):
+            sources.setdefault(skill, "ner")
+    for skill in resume_skills_in_text(text, skill_list):
+        sources.setdefault(skill, "text")
+    skills = list(sources)
 
     # Education: the first DEGREE, the school (ORG) from 2 lines above to 1
     # line below it, and the first real date from 1 line above to 1 below
@@ -537,6 +632,7 @@ def build_profile_from_ner(ents, text, skill_list):
     # Company = ORG on the same line, else the line above/below.
     # Dates = the first two real dates from the title's line to 2 lines below.
     skip = non_job_lines(text) | education_lines
+    text_lines = text.split("\n")
     title_lines = sorted({e["line"] for e in by_label("JOB_TITLE") if e["line"] not in skip})
     used_orgs, jobs = set(), []
     for n, line in enumerate(title_lines):
@@ -551,8 +647,11 @@ def build_profile_from_ner(ents, text, skill_list):
             used_orgs.add(company["start"])
         dates = [e for e in by_label("DATE") if line <= e["line"] <= line + 2
                  and e["line"] < next_title and parse_date(e["text"]) is not None]
-        job = {"company": company["text"] if company else None, "title": title["text"],
-               "dates": None, "months": 0}
+        if company:
+            company_name, title_name = company["text"], title["text"]
+        else:
+            company_name, title_name = company_from_line(text_lines[line], title["text"])
+        job = {"company": company_name, "title": title_name, "dates": None, "months": 0}
         if len(dates) >= 2:
             start, end = parse_date(dates[0]["text"]), parse_date(dates[1]["text"], is_end=True)
             if end >= start:
@@ -561,6 +660,7 @@ def build_profile_from_ner(ents, text, skill_list):
         jobs.append(job)
 
     profile["skills"] = skills
+    profile["skill_sources"] = sources
     profile["education"] = education
     profile["experience"] = jobs
     profile["experience_years"] = round(sum(j["months"] for j in jobs) / 12, 1)

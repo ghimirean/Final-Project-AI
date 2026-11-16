@@ -46,7 +46,7 @@ from pydantic import BaseModel, Field
 
 from datetime import date
 
-from resume_parser import load_skills, extract_skills, to_months
+from resume_parser import load_skills, extract_skills, resume_skills_in_text, to_months
 from embeddings import embed, resume_job_similarities, EmbeddingError
 from keypoints import (KEYPOINT_CONFIG, content_words, extract_keyphrases, is_evidence,
                        match_phrases, resume_lines)
@@ -235,7 +235,7 @@ def candidate_skills(profile, skill_list=None):
         skill_list = load_skills(SKILLS_PATH)
     skills = list(profile.get("skills", []))
     seen = {s.lower() for s in skills}
-    for skill in extract_skills(profile.get("raw_text") or "", skill_list):
+    for skill in resume_skills_in_text(profile.get("raw_text") or "", skill_list):
         if skill.lower() not in seen:
             seen.add(skill.lower())
             skills.append(skill)

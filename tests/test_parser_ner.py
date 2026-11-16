@@ -15,8 +15,8 @@ import pytest
 
 import resume_parser
 from resume_parser import (
-    NER_CONFIG, NERUnavailable, build_profile_from_ner, ner_entities, non_job_lines,
-    parse_date, parse_resume, parse_resume_ner,
+    NER_CONFIG, NERUnavailable, build_profile_from_ner, company_from_line, load_skills, ner_entities,
+    non_job_lines, parse_date, parse_resume, parse_resume_ner,
 )
 from pipeline import run_pipeline
 
@@ -134,11 +134,27 @@ def test_skills_in_links_are_dropped(fake_ner):
     assert profile["skills"] == ["Python"]
 
 
+def profile_from(text, spans, skill_list):
+    # Builds a profile from hand-placed entities: spans = [(entity text, label), ...]
+    ents = [FakeEnt(text, text.index(t), text.index(t) + len(t), label) for t, label in spans]
+    return build_profile_from_ner(ner_entities(lambda _: FakeDoc(ents), text), text, skill_list)
+
+
 def test_skill_spelling_from_skills_list(fake_ner):
-    text = "Ann Lee\nSkills\npython, Kubernetes"
-    ents = [FakeEnt(text, 0, 7, "PERSON"), FakeEnt(text, 15, 21, "SKILL"), FakeEnt(text, 23, 33, "SKILL")]
-    profile = build_profile_from_ner(ner_entities(lambda t: FakeDoc(ents), text), text, ["Python"])
-    assert profile["skills"] == ["Python", "Kubernetes"]     # new skills beyond the list are kept
+    p = profile_from("Ann Lee\nSkills\npython, Kubernetes",
+                     [("Ann Lee", "PERSON"), ("python", "SKILL"), ("Kubernetes", "SKILL")], ["Python"])
+    assert p["skills"] == ["Python"]          # spelled like skills.txt; unknown "Kubernetes" dropped
+
+
+def test_skill_entity_linking():
+    text = ("Ann Lee\nSkills: Java Programming, Microsoft Excel, Object-Oriented Programming, OOP\n"
+            "Location: Kushtia\nRelevant Coursework: Analysis of Algorithms")
+    p = profile_from(text, [("Ann Lee", "PERSON"), ("Java Programming", "SKILL"),
+                            ("Microsoft Excel", "SKILL"), ("Object-Oriented Programming", "SKILL"),
+                            ("OOP", "SKILL"), ("Kushtia", "SKILL")], load_skills(SKILLS))
+    assert p["skills"] == ["Java", "Excel", "OOP", "Algorithms"]   # linked, no duplicates, no place
+    assert p["skill_sources"] == {"Java": "ner", "Excel": "ner", "OOP": "ner",
+                                  "Algorithms": "text"}            # coursework: found by text match
 
 
 def test_all_caps_name_is_title_cased():
@@ -237,3 +253,33 @@ def test_real_model_on_fixture(real_model, capsys):
     assert profile["name"] == "Marcus Oyelaran"
     assert profile["experience_years"] == 3.0
     assert "WARNING" not in capsys.readouterr().err
+
+
+def test_skill_entity_in_future_work_is_dropped():
+    text = "Ann Lee\nProject\n- Used Git and wrote a future roadmap for Docker support"
+    p = profile_from(text, [("Ann Lee", "PERSON"), ("Git", "SKILL"), ("Docker", "SKILL")],
+                     load_skills(SKILLS))
+    assert p["skills"] == ["Git"]
+
+
+@pytest.mark.parametrize("line, ner_title, expected", [
+    # The model missed the company
+    ("Chick-fil-A | Team Member (Cashier) Aug 2024 – Present", "Team Member (Cashier)",
+     ("Chick-fil-A", "Team Member (Cashier)")),
+    # The model tagged BOTH halves as titles and the first one won: the
+    # "Company | Title" split fixes both fields (it really did this)
+    ("Quillstone Media | Web Developer", "Quillstone Media", ("Quillstone Media", "Web Developer")),
+    ("Team Member, Aug 2024 - Present", "Team Member", (None, "Team Member")),   # no "|"
+    ("Acme | Remote | 2023 - 2024", "Developer", (None, "Developer")),          # title not in the split
+])
+def test_company_from_line(line, ner_title, expected):
+    assert company_from_line(line, ner_title) == expected
+
+
+def test_missing_company_recovered_from_title_line():
+    # The model found the title but not "Chick-fil-A" (it really missed it)
+    text = "Ann Lee\nEXPERIENCE\nChick-fil-A | Team Member (Cashier)\nAug 2024 – Dec 2024"
+    p = profile_from(text, [("Ann Lee", "PERSON"), ("Team Member (Cashier)", "JOB_TITLE"),
+                            ("Aug 2024", "DATE"), ("Dec 2024", "DATE")], [])
+    assert p["experience"] == [{"company": "Chick-fil-A", "title": "Team Member (Cashier)",
+                                "dates": "Aug 2024 – Dec 2024", "months": 5}]
