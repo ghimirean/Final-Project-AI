@@ -29,12 +29,15 @@ def validate_jobs(jobs):
 PARSERS = {"ner": parse_resume_ner, "llm": parse_resume_llm, "rules": parse_resume}
 
 
-def run_pipeline(resume_path, jobs, use_llm=True, parser="ner"):
+def run_pipeline(resume_path, jobs, use_llm=True, parser="ner", llm_key_points=False):
     """Parses a resume (.pdf or .docx) and ranks the given jobs for it.
+    By default everything runs locally: Agent 1 = NER model, Agent 3 =
+    embeddings (scores + KeyBERT key points). No API calls.
     parser: how Agent 1 reads the resume: "ner" (default, local NER model),
         "llm" (Gemini) or "rules". NER and LLM fall back to rules on failure.
-    use_llm=True (default): Agent 3 (Groq) writes key points for the top jobs.
-    use_llm=False: no API calls at all (an "llm" parser becomes "rules").
+    llm_key_points=True (optional): Agent 3 asks Groq for the top jobs' key points.
+    use_llm=False: forbids all API calls (an "llm" parser becomes "rules",
+        and llm_key_points is ignored).
     Returns {"profile": {...}, "ranked_jobs": [...]}.
     """
     validate_jobs(jobs)
@@ -43,7 +46,8 @@ def run_pipeline(resume_path, jobs, use_llm=True, parser="ner"):
     if parser == "llm" and not use_llm:
         parser = "rules"
     profile = PARSERS[parser](resume_path, skills_path=SKILLS_PATH)
-    ranked = rank_jobs(profile, jobs, use_llm=use_llm)   # uses raw_text for similarity
+    # uses raw_text for similarity
+    ranked = rank_jobs(profile, jobs, use_llm=use_llm and llm_key_points)
     # raw_text is only needed for scoring; leave it out of the result
     public_profile = {k: v for k, v in profile.items() if k != "raw_text"}
     return {"profile": public_profile, "ranked_jobs": ranked}

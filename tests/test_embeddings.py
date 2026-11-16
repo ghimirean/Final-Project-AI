@@ -2,7 +2,6 @@
 downloaded and sentence-transformers is never loaded."""
 import json
 import os
-import sys
 
 import numpy as np
 import pytest
@@ -129,5 +128,7 @@ def test_falls_back_when_embedding_fails_midway(monkeypatch):
     assert text_scores(STUDENT, JOBS)[0]["method"] == "tfidf"
 
 
-def test_real_model_library_is_never_loaded_by_tests():
-    assert "sentence_transformers" not in sys.modules
+def test_real_model_is_never_loaded_by_tests():
+    # tests/test_keypoints.py imports KeyBERT (which imports the
+    # sentence-transformers library), but no real model is ever loaded
+    assert embeddings._model is None
