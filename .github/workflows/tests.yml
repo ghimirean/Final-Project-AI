@@ -1,0 +1,29 @@
+# Runs the test suite on every push and pull request.
+# No API keys are needed: the tests block all LLM calls and the embedding
+# model download (tests/conftest.py), and the NER model is committed in git.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        # The extra index gives the CPU-only build of torch (same version as
+        # requirements.txt) instead of the multi-GB GPU build; tests don't use a GPU.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run tests
+        run: python -m pytest -v

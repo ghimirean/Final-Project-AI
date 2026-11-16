@@ -468,6 +468,10 @@ that's deleted as soon as the request finishes.
 python -m pytest -v
 ```
 
+The tests run offline with no API keys. GitHub Actions
+(`.github/workflows/tests.yml`) runs them on every push and pull request;
+see the **Actions** tab on GitHub, or the ✓ / ✗ next to each commit.
+
 | File | Covers |
 |---|---|
 | `tests/test_llm.py` | `ask_llm`: Gemini/Groq requests, JSON + schema validation, missing keys, retries and `retry-after` |
