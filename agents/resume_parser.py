@@ -554,18 +554,22 @@ def non_job_lines(text):
 
 
 def company_from_line(line, title):
-    """Rule-based fallback when NER finds a job title but no company: split
-    the title's line like the rule-based parser does ("Company | Title") and
-    take the part that isn't the title, without its dates. The model misses
-    some names it never saw in training, e.g. "Chick-fil-A | Team Member (Cashier)"."""
-    if "|" not in line:
-        return None
+    """Rule-based fallback when NER finds a job title but no company.
+    Returns (company, title). The title's line is split exactly like the
+    rule-based parser does: "Company | Title" (dates removed). The model
+    misses some names it never saw ("Chick-fil-A | Team Member (Cashier)"),
+    and sometimes tags BOTH halves as titles ("Quillstone Media | Web
+    Developer"), so the split decides both fields, as long as the NER title
+    is one of the two parts. Otherwise: (None, NER title)."""
+    parts = []
     for part in line.split("|"):
         part = re.sub(DATE_RANGE, "", part, flags=re.IGNORECASE)
         part = re.sub(DATE, "", part, flags=re.IGNORECASE).strip(" ,–—-\t")
-        if part and title.lower() not in part.lower():
-            return part
-    return None
+        if part:
+            parts.append(part)
+    if len(parts) >= 2 and any(title.lower() in p.lower() for p in parts[:2]):
+        return parts[0], parts[1]
+    return None, title
 
 
 def build_profile_from_ner(ents, text, skill_list):
@@ -643,9 +647,11 @@ def build_profile_from_ner(ents, text, skill_list):
             used_orgs.add(company["start"])
         dates = [e for e in by_label("DATE") if line <= e["line"] <= line + 2
                  and e["line"] < next_title and parse_date(e["text"]) is not None]
-        company_name = (company["text"] if company
-                        else company_from_line(text_lines[line], title["text"]))
-        job = {"company": company_name, "title": title["text"], "dates": None, "months": 0}
+        if company:
+            company_name, title_name = company["text"], title["text"]
+        else:
+            company_name, title_name = company_from_line(text_lines[line], title["text"])
+        job = {"company": company_name, "title": title_name, "dates": None, "months": 0}
         if len(dates) >= 2:
             start, end = parse_date(dates[0]["text"]), parse_date(dates[1]["text"], is_end=True)
             if end >= start:

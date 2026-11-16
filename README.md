@@ -91,7 +91,7 @@ entities of given types. Ours recognizes six types:
      ("documented a future roadmap for GUI development") is ignored.
      "Machine/Deep Learning" are skill names, not plans.
    - education = first `DEGREE`, the `ORG` up to 2 lines above or 1 below it, and the nearest date
-   - jobs = one per line with a `JOB_TITLE`, with the `ORG` on the same or a neighbouring line and the next two real dates (job titles inside Projects, Leadership or Awards sections are ignored). If the model finds a title but no company, the title's line is split like the rule-based parser does ("Chick-fil-A | Team Member (Cashier)")
+   - jobs = one per line with a `JOB_TITLE`, with the `ORG` on the same or a neighbouring line and the next two real dates (job titles inside Projects, Leadership or Awards sections are ignored). If the model finds a title but no company, the title's line is split like the rule-based parser does, first part = company, second = title ("Chick-fil-A | Team Member (Cashier)"). This also fixes lines where the model tagged both halves as titles ("Quillstone Media | Web Developer")
 4. **Python does the date math**, exactly as in the other parsers. `DATE`
    entities that aren't real dates (the model sometimes tags "weekly" or
    "three years") are skipped.
@@ -611,8 +611,9 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
   ("Chick-fil-A") not seen as companies, place names or course names
   tagged as skills, a company and a job title swapped in unfamiliar layouts.
   Entity linking now drops skill entities that aren't known skills, the
-  "Company | Title" split recovers a missed company, and coursework skills
-  come from the text match, so on sample.pdf these no longer reach the profile.
+  "Company | Title" split recovers a missed company or a company tagged as a
+  title, and coursework skills come from the text match, so on sample.pdf and
+  the 3 fixtures these no longer reach the profile (every job is right).
 - **Only skills in `skills.txt` are kept.** Linking drops anything else,
   including real skills that aren't on the list ("Word", "Kubernetes").
   Adding a skill to `skills.txt` changes the NER training data generator,
@@ -628,9 +629,8 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
     of a company name ("Docker Harborline Logistics"), the degree is cut at
     the column break ("Associate of Science in"), the graduation date is
     taken from the job next to it (Jan 2021 instead of May 2023), and the
-    hyphenated name is cut ("Jordan Okafor"). The model also tagged
-    "Copperfield Diner" as the job title, so the company recovery took
-    "Line Cook" as the company (title and company swapped).
+    hyphenated name is cut ("Jordan Okafor"), and the other column's
+    heading sticks to a company ("EDUCATION Copperfield Diner").
   - *No section headings:* the name was tagged ORG, so the "name" became
     "Web Studio" (a PERSON tag inside "Lumen Web Studio"), and the first job
     was lost because "Front-End Developer" was tagged ORG, not JOB_TITLE. The

@@ -262,13 +262,18 @@ def test_skill_entity_in_future_work_is_dropped():
     assert p["skills"] == ["Git"]
 
 
-@pytest.mark.parametrize("line, title, company", [
-    ("Chick-fil-A | Team Member (Cashier) Aug 2024 – Present", "Team Member (Cashier)", "Chick-fil-A"),
-    ("Team Member | Chick-fil-A | 2023 - 2024", "Team Member", "Chick-fil-A"),
-    ("Team Member, Aug 2024 - Present", "Team Member", None),            # no "|": unknown
+@pytest.mark.parametrize("line, ner_title, expected", [
+    # The model missed the company
+    ("Chick-fil-A | Team Member (Cashier) Aug 2024 – Present", "Team Member (Cashier)",
+     ("Chick-fil-A", "Team Member (Cashier)")),
+    # The model tagged BOTH halves as titles and the first one won: the
+    # "Company | Title" split fixes both fields (it really did this)
+    ("Quillstone Media | Web Developer", "Quillstone Media", ("Quillstone Media", "Web Developer")),
+    ("Team Member, Aug 2024 - Present", "Team Member", (None, "Team Member")),   # no "|"
+    ("Acme | Remote | 2023 - 2024", "Developer", (None, "Developer")),          # title not in the split
 ])
-def test_company_from_line(line, title, company):
-    assert company_from_line(line, title) == company
+def test_company_from_line(line, ner_title, expected):
+    assert company_from_line(line, ner_title) == expected
 
 
 def test_missing_company_recovered_from_title_line():
