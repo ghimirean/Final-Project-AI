@@ -173,6 +173,9 @@ def test_provider_error_does_not_crash(monkeypatch):
     result = agent.run_job_agent(PROFILE, Broken())
     assert result["jobs"] == []
 
+     # the failure is recorded in the trace so callers can tell it from "no jobs"
+    assert any(step.get("search_error") == "RuntimeError" for step in result["trace"])
+
 
 # ---------- prompt and query helpers ----------
 

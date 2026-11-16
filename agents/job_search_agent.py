@@ -167,6 +167,8 @@ def run_job_agent(profile, provider, location="", limit=20, config=None,
             if len(found) < limit:
                 found[job["id"]] = job
         entry["returned"], entry["new"] = len(jobs), len(new_jobs)
+        if error:
+            entry["search_error"] = error      # lets the API tell "no jobs" from "source failed"
         history.append(observe(step, query, jobs, len(new_jobs), len(found), error))
         if len(found) >= limit:
             break
