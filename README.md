@@ -348,13 +348,30 @@ or `"llm"` when the optional Groq key points are on.)
    different from each other, so you don't get five versions of
    "internship". KeyBERT gets our `embeddings.embed()` as its model, so the
    model is loaded only once.
-3. **Semantic search against the resume.** Each key phrase is embedded and
-   compared with every resume line of 3+ words (shorter lines are headings
-   like "Work Experience", which match almost anything). A phrase is
-   **covered** if the resume lists one of its skills, or if a line reaches
-   similarity **0.45**. The best line is kept as `evidence` so a person can
-   check it.
-4. **The fields**, built in Python from the phrases, the skill list and the matches:
+3. **What kind of phrase is it?** (`phrase_kind`) — checked in order:
+   **skill** (contains a `skills.txt` skill: "performance-critical C++
+   services"), **degree** (is a degree, or follows a degree word in its
+   sentence: "Bachelor's degree in *Computer Science*", "students studying
+   *Computer Science*"), **experience** (follows "N years" in its sentence:
+   "5+ years of *professional backend* experience"), otherwise **role**: it
+   describes the role, team or company ("junior developer", "Summer
+   internship", "designers", "small business clients"). Role phrases stay in
+   `key_points` but are never gaps or "asked for, not on the resume".
+4. **Is it on the resume?** (`coverage`)
+   - *skill*: every skill in the phrase is one of the candidate's skills (exact match)
+   - *degree*: a level ("Bachelor") needs a degree at least that high; a
+     field ("Computer Science") must appear word for word in the candidate's
+     degree, unless the posting accepts "a related field"
+   - *experience / role*: semantic search. The phrase is embedded and
+     compared with every resume line; the best line is **evidence** if its
+     similarity is ≥ **0.45**, or ≥ **0.55** when a multi-word phrase shares
+     only one word with it ("customer data" ↔ "…multi-customer support").
+     Wrapped lines are joined back to their bullet first, and lines under 4
+     words (headings like "Work Experience") are never evidence.
+   Skills and degrees use rules because similarity got facts wrong: it rated
+   "Computer Science" ↔ "B.S. Computer *Engineering*" (0.67) above
+   "Statistics" ↔ "B.S. in Statistics" (0.61).
+5. **The fields**, built in Python from the phrases, the skill list and the matches:
 
 | Field | How |
 |---|---|
@@ -362,14 +379,20 @@ or `"llm"` when the optional Groq key points are on.)
 | `required_skills` | the posting's skills from `data/skills.txt`, minus the nice-to-haves |
 | `nice_to_have` | skills in a sentence with "plus", "bonus", "preferred", "desired", … |
 | `fit_summary` | the one-line `reason` + "the resume shows K of N key points" |
-| `gaps` | missing required skills, key phrases with no resume evidence, years/degree gaps |
+| `gaps` | missing required skills, skill/degree/experience key phrases not on the resume, years/degree gaps (never role phrases) |
 | `interview_focus` | up to 3 gaps to probe first, then covered key points to ask for an example of, with the resume evidence |
-| `key_point_matches` | every phrase with its relevance, resume similarity, covered and evidence |
+| `key_point_matches` | every phrase with its kind, relevance, resume similarity, covered and evidence |
 
-- **Why 0.45?** Measured on the 3 fake fixture resumes × 6 fixture jobs:
-  real matches ("dashboards" for the data analyst, 0.54; "building
-  websites" for the web developer, 0.47) were ≥ 0.45, and unrelated phrases
-  were mostly below 0.40.
+- **Why 0.45 / 0.55?** Measured on the 3 fake fixture resumes × every
+  non-skill phrase of the 6 fixture jobs (102 pairs). True matches:
+  "dashboards" 0.54, "analytics" (a data-analyst job line) 0.53,
+  "building websites" ← "Built client sites with React and Node.js" 0.47
+  (no shared word at all). False matches: 0.44 and below ("junior
+  engineers" ← a degree line, "datasets" ← an Excel line).
+- **Skills from the whole resume.** Agent 3 matches against Agent 1's
+  skills plus every `skills.txt` skill found anywhere in the resume text,
+  so a skill mentioned only in coursework ("Analysis of Algorithms") or a
+  project counts. `breakdown.matched_from_text` lists those.
 - **The key points never change the score.** The score is computed first,
   by the scoring code.
 - **Speed and privacy:** about 0.3 s per job, offline, nothing sent anywhere.
@@ -617,17 +640,17 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
   (start = January, end = December).
 
 **Agent 3, key points (KeyBERT + embeddings, default)**
-- **No reasoning about the candidate.** Embedding similarity can't tell
-  that a graduate doesn't fit a current-student internship, or that
-  Computer Engineering isn't Computer Science (it counted that line as
-  evidence, similarity 0.67). The evidence line is shown so a person or the
-  interview agent can judge it.
+- **No reasoning about the candidate.** It can't tell that a graduate
+  doesn't fit a current-student internship. Degrees and fields are checked
+  by exact rules, so "a related field" is accepted for any degree: rules
+  can't judge whether two fields are related.
 - **Phrases, not explanations.** Some picks are generic ("Bachelor",
-  "Computer Science"), and descriptive phrases ("internal tools") become
-  gaps when the resume doesn't use similar words.
-- **The 0.45 threshold** was measured on only 3 fake resumes and 6 jobs,
-  and fits only this model. "data science" vs. a "Computer Science" line
-  scored 0.53, so a few related-but-different phrases count as covered.
+  "Computer Science").
+- **The kind rules are word rules.** A tool missing from `skills.txt`
+  ("dashboards", "version control") counts as a role phrase, so it is never
+  a gap.
+- **The 0.45 / 0.55 thresholds** come from only 3 fake resumes and 6 jobs,
+  and fit only this model.
 - **Nice-to-haves are cue words**: only skills in a sentence with "plus",
   "bonus", "preferred", … are found.
 

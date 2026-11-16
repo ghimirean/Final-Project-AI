@@ -48,7 +48,7 @@ from datetime import date
 
 from resume_parser import load_skills, extract_skills, to_months
 from embeddings import embed, resume_job_similarities, EmbeddingError
-from keypoints import extract_keyphrases, match_phrases, resume_lines
+from keypoints import extract_keyphrases, is_evidence, match_phrases, resume_lines
 from llm import ask_llm, LLMError
 
 # OPTIONAL LLM key points (OFF by default: Agent 3 uses embeddings, and
@@ -498,15 +498,62 @@ def phrase_kind(phrase, description, skill_list):
     return "role"
 
 
-def embedding_assessment(job, breakdown, req, matches, skill_list=None):
+def coverage(match, kind, description, have, education, skill_list):
+    """Does the resume show this key phrase? Returns (covered, evidence).
+      skill:  every skill in the phrase is one of the candidate's skills (exact)
+      degree: a degree level ("Bachelor") -> the candidate's degree is at least
+              that level; a field ("Computer Science") -> it appears word for
+              word in the candidate's degree, or the posting accepts "a related
+              field" and the candidate has a degree
+      experience / role: the most similar resume line passes is_evidence()
+    Skills and degrees are facts, so similarity is never used for them: it
+    rated "Computer Science" vs. "Computer Engineering" (0.67) higher than a
+    true match ("Statistics" vs. "BS in Statistics", 0.61)."""
+    phrase = match["phrase"]
+    if kind == "skill":
+        needed = extract_skills(phrase, skill_list)
+        if all(s.lower() in have for s in needed):
+            return True, "skills: " + ", ".join(needed)
+        return False, None
+    if kind == "degree":
+        degree_text = education.get("degree") or ""
+        field = education.get("field") or ""
+        if field and field.lower() not in degree_text.lower():
+            degree_text = f"{degree_text} ({field})" if degree_text else field
+        level = extract_degree(phrase)
+        if level:
+            covered = degree_rank(extract_degree(degree_text)) >= degree_rank(level)
+            return covered, (degree_text if covered else None)
+        if re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", degree_text, re.IGNORECASE):
+            return True, degree_text
+        sentence, _ = sentence_with(phrase, description)
+        if degree_text and re.search(r"\brelated field", sentence, re.IGNORECASE):
+            return True, f"{degree_text} (the posting accepts a related field)"
+        return False, None
+    line = match.get("best_line")
+    if line and is_evidence(phrase, line, match["resume_similarity"]):
+        return True, line
+    return False, None
+
+
+def embedding_assessment(job, breakdown, req, matches, skill_list=None, profile=None):
     """Key points from KeyBERT phrases + embedding matches against the resume.
     matches: from keypoints.match_phrases(). Same fields as the other methods,
     plus "key_point_matches" (the evidence behind every key point, with its
     "kind": skill / degree / experience / role)."""
     if skill_list is None:
         skill_list = load_skills(SKILLS_PATH)
-    matches = [dict(m, kind=phrase_kind(m["phrase"], job["description"], skill_list))
-               for m in matches]
+    profile = profile or {}
+    have = {s.lower() for s in candidate_skills(profile, skill_list)}
+    education = profile.get("education") or {}
+    checked = []
+    for m in matches:
+        kind = phrase_kind(m["phrase"], job["description"], skill_list)
+        covered, evidence = coverage(m, kind, job["description"], have, education, skill_list)
+        checked.append({"phrase": m["phrase"], "kind": kind, "relevance": m["relevance"],
+                        "resume_similarity": m["resume_similarity"],
+                        "covered": covered, "evidence": evidence})
+    matches = checked
     nice = nice_to_have_skills(job["description"], req["skills"])
     missing = [s for s in breakdown["missing_skills"] if s not in nice]
 
@@ -523,7 +570,8 @@ def embedding_assessment(job, breakdown, req, matches, skill_list=None):
     # Interview: probe up to 3 gaps first, then ask for examples of what the
     # resume claims, best-matching key points first
     probes = [f"{x} (asked for, not on the resume)" for x in missing + uncovered][:3]
-    checks = [f"{m['phrase']} (ask for an example; resume: {m['evidence']})" for m in covered]
+    checks = [f"{m['phrase']} (ask for an example; resume: {m['evidence']})"
+              for m in covered if m["kind"] != "degree"]      # no "example" of a degree
     focus = (probes + checks)[:MAX_FOCUS]
 
     reason = make_reason(breakdown)
@@ -560,9 +608,9 @@ class KeyPointer:
                 if self.lines is None:
                     self.lines = resume_lines(resume_text(self.profile))
                     self.line_vectors = embed(self.lines) if self.lines else None
-                matches = match_phrases(phrases, self.lines, self.skills, self.line_vectors)
-                return (embedding_assessment(job, breakdown, req, matches, self.skill_list),
-                        "embeddings")
+                matches = match_phrases(phrases, self.lines, self.line_vectors)
+                return (embedding_assessment(job, breakdown, req, matches, self.skill_list,
+                                             self.profile), "embeddings")
             except EmbeddingError as e:
                 self.broken = True
                 print(f"[Agent 3] Embedding key points unavailable ({e}); using rules.",

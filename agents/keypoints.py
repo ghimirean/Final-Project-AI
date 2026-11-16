@@ -14,14 +14,13 @@ other, so we don't get five versions of "internship".
        through embeddings.embed()), so it is the same local model that
        scores the jobs. Nothing leaves this computer.
     3. Each key phrase is compared with each resume line (embedding
-       similarity). A phrase counts as "covered" if the resume lists one of
-       its skills or has a line at least COVERED_AT similar to it; the best
-       line is kept as evidence so a person can check it.
+       similarity) and the best line is kept. job_synthesizer decides what
+       counts as covered: skills and degrees by exact rules, experience and
+       role phrases by is_evidence() below, so a person can check the line.
 """
 import re
 
 from embeddings import EmbeddingError, embed
-from resume_parser import extract_skills
 
 KEYPOINT_CONFIG = {
     "top_n": 6,           # key phrases per job
@@ -29,18 +28,25 @@ KEYPOINT_CONFIG = {
     "spacy_model": "en_core_web_sm",
 }
 
-# Phrase-to-resume-line similarity at or above this counts as covered.
-# Measured on the 3 fake fixture resumes x 6 fixture jobs: real matches
-# ("dashboards" for the data analyst 0.54, "building websites" for the web
-# developer 0.47) were >= 0.45, while unrelated phrases were mostly below
-# 0.40. A few related-but-different phrases land near it ("data science"
-# vs. a "Computer Science" line: 0.53), so the matching line is always
-# reported as evidence.
+# EVIDENCE RULES for experience / role phrases (skills and degrees are
+# decided by exact rules in job_synthesizer, never by similarity).
+# Measured on the 3 fake fixture resumes x every non-skill phrase of the 6
+# fixture jobs (102 pairs), after the degree/field phrases moved to rules:
+#   true matches:  "dashboards" <- "Built weekly sales dashboards in Tableau" 0.54,
+#                  "analytics" <- "Brightline Analytics | Junior Data Analyst" 0.53,
+#                  "building websites" <- "Built client sites with React and Node.js." 0.47
+#   false matches: "junior engineers" <- a degree line 0.44, "datasets" <- "Organized
+#                  digital catalog records in Excel" 0.43, everything else lower
 COVERED_AT = 0.45
+# A multi-word phrase that shares exactly ONE word with the line is usually
+# matched because of that word ("customer data" <- "and multi-customer
+# support"), so it needs a clearly higher similarity.
+SINGLE_SHARED_WORD_AT = 0.55
 
-# Resume lines shorter than this are headings ("Work Experience") and match
-# almost any job phrase, so they are not used as evidence.
-MIN_LINE_WORDS = 3
+# Lines shorter than this are headings ("Work Experience") or fragments and
+# match almost any job phrase, so they are never evidence.
+MIN_LINE_WORDS = 4
+BULLETS = "•▪◦●○■□➢►-–—*· \t"
 
 # Words: keeps C++, C#, Node.js, .NET-style tokens together
 TOKEN = r"[A-Za-z][A-Za-z0-9+#.]*[A-Za-z0-9+#]|[A-Za-z]"
@@ -144,13 +150,38 @@ def extract_keyphrases(text, top_n=None):
 
 
 def resume_lines(text):
-    return [line.strip() for line in (text or "").splitlines()
-            if len(line.split()) >= MIN_LINE_WORDS]
+    """Resume lines usable as evidence. A line that starts in lowercase
+    ("and multi-customer support") is the wrapped end of the line above, so
+    it is joined back on. Bullet marks are removed; short lines are dropped."""
+    lines = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if lines and line[0].islower():
+            lines[-1] += " " + line
+        else:
+            lines.append(line.lstrip(BULLETS).strip())
+    return [line for line in lines if len(line.split()) >= MIN_LINE_WORDS]
 
 
-def match_phrases(phrases, lines, candidate_skills, line_vectors=None):
-    """For each key phrase: is it on the resume, and where?
-    Returns [{"phrase", "relevance", "resume_similarity", "covered", "evidence"}].
+def content_words(text):
+    return set(re.findall(r"[a-z0-9+#]+", text.lower())) - _stop_words()
+
+
+def is_evidence(phrase, line, similarity):
+    """Is this resume line real evidence for an experience / role phrase?"""
+    if similarity < COVERED_AT:
+        return False
+    words = content_words(phrase)
+    if len(words) >= 2 and len(words & content_words(line)) == 1:
+        return similarity >= SINGLE_SHARED_WORD_AT
+    return True
+
+
+def match_phrases(phrases, lines, line_vectors=None):
+    """For each key phrase, the most similar resume line.
+    Returns [{"phrase", "relevance", "resume_similarity", "best_line"}].
 
     phrases: [(phrase, relevance)] from extract_keyphrases.
     line_vectors: embed(lines), passed in so a resume is embedded only once.
@@ -162,17 +193,11 @@ def match_phrases(phrases, lines, candidate_skills, line_vectors=None):
     phrase_vectors = embed([p for p, _ in phrases])
     matches = []
     for i, (phrase, relevance) in enumerate(phrases):
-        similarity, evidence = 0.0, None
+        similarity, best_line = 0.0, None
         if lines:
             row = phrase_vectors[i] @ line_vectors.T     # unit vectors: dot = cosine
             best = int(row.argmax())
-            similarity, evidence = float(row[best]), lines[best]
-        skills = extract_skills(phrase, candidate_skills)
-        if skills:                                     # an exact skill beats similarity
-            covered, evidence = True, "skills: " + ", ".join(skills)
-        else:
-            covered = similarity >= COVERED_AT
+            similarity, best_line = float(row[best]), lines[best]
         matches.append({"phrase": phrase, "relevance": relevance,
-                        "resume_similarity": round(similarity, 3),
-                        "covered": covered, "evidence": evidence if covered else None})
+                        "resume_similarity": round(similarity, 3), "best_line": best_line})
     return matches

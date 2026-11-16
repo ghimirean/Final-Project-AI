@@ -15,10 +15,12 @@ import embeddings
 import keypoints
 import llm
 from job_synthesizer import (
-    SKILLS_PATH, embedding_assessment, extract_requirements, load_skills, nice_to_have_skills,
-    phrase_kind, rank_jobs, score_match,
+    SKILLS_PATH, coverage, embedding_assessment, extract_requirements, load_skills,
+    nice_to_have_skills, phrase_kind, rank_jobs, score_match,
 )
-from keypoints import COVERED_AT, candidate_phrases, extract_keyphrases, match_phrases, resume_lines
+from keypoints import (
+    COVERED_AT, candidate_phrases, extract_keyphrases, is_evidence, match_phrases, resume_lines,
+)
 
 REAL_LOAD_KEYBERT = keypoints._load_keybert          # saved before conftest blocks it
 
@@ -115,27 +117,69 @@ def test_keybert_blocked_raises_embedding_error():
 
 # ---------- matching key phrases against the resume ----------
 
-def test_resume_lines_skip_headings():
-    assert resume_lines("Skills\nWork Experience\nBuilt a chess engine in Java") == \
-        ["Built a chess engine in Java"]
+def test_resume_lines_skip_headings_and_join_wrapped_lines():
+    text = ("Skills\nWork Experience\n• Built a chess engine in Java\n"
+            "• Answered tickets for the help desk\nand multi-customer support")
+    assert resume_lines(text) == [
+        "Built a chess engine in Java",                                      # bullet removed
+        "Answered tickets for the help desk and multi-customer support",    # wrapped line joined
+    ]
 
 
-def test_match_by_skill_by_similarity_and_not_at_all(fake_model):
+def test_match_finds_the_best_line(fake_model):
     lines = resume_lines(STUDENT["raw_text"])
-    matches = match_phrases([("C++", 0.5), ("internal tools", 0.4), ("Tableau dashboards", 0.3)],
-                            lines, STUDENT["skills"])
-    by_phrase = {m["phrase"]: m for m in matches}
-    assert by_phrase["C++"]["covered"] and by_phrase["C++"]["evidence"] == "skills: C++"
-    tools = by_phrase["internal tools"]
-    assert tools["covered"] and tools["resume_similarity"] >= COVERED_AT
-    assert tools["evidence"] == "Built internal tools for the campus library in Java."
-    assert not by_phrase["Tableau dashboards"]["covered"]
-    assert by_phrase["Tableau dashboards"]["evidence"] is None
+    by_phrase = {m["phrase"]: m for m in match_phrases(
+        [("internal tools", 0.4), ("Tableau dashboards", 0.3)], lines)}
+    assert by_phrase["internal tools"]["best_line"] == "Built internal tools for the campus library in Java."
+    assert by_phrase["internal tools"]["resume_similarity"] >= COVERED_AT
+    assert by_phrase["Tableau dashboards"]["resume_similarity"] < COVERED_AT
 
 
 def test_match_with_empty_resume(fake_model):
-    matches = match_phrases([("Java", 0.5)], [], [])
-    assert matches[0]["covered"] is False and matches[0]["resume_similarity"] == 0.0
+    m = match_phrases([("Java", 0.5)], [])[0]
+    assert m["resume_similarity"] == 0.0 and m["best_line"] is None
+
+
+def test_evidence_rules():
+    line = "Answered tickets for the help desk and multi-customer support"
+    assert not is_evidence("customer data", line, 0.50)          # shares one word only: needs 0.55
+    assert is_evidence("customer data", line, 0.56)
+    assert is_evidence("building websites", "Built client sites with React", 0.47)   # no shared word is fine
+    assert not is_evidence("building websites", "Built client sites with React", 0.44)
+    assert is_evidence("dashboards", "Built weekly sales dashboards in Tableau", 0.46)  # one-word phrase
+
+
+# ---------- coverage: skills and degrees by rules, the rest by evidence ----------
+
+DESC = JOBS["job-001"]["description"]     # "... degree in Computer Science or a related field ..."
+SKILLS = load_skills(SKILLS_PATH)
+
+
+def cover(phrase, kind, best_line=None, similarity=0.0, have=(), degree="", description=DESC):
+    m = {"phrase": phrase, "resume_similarity": similarity, "best_line": best_line}
+    return coverage(m, kind, description, {s.lower() for s in have}, {"degree": degree}, SKILLS)
+
+
+def test_skill_phrases_need_the_exact_skill():
+    assert cover("GitHub", "skill", "Set up Git for the team", 0.6, have=["Git"]) == (False, None)
+    assert cover("performance-critical C++ services", "skill", have=["C++"]) == (True, "skills: C++")
+
+
+def test_degree_level_and_field():
+    bs_ce = "Bachelor of Science in Computer Engineering"
+    assert cover("Bachelor", "degree", degree=bs_ce) == (True, bs_ce)
+    assert cover("Bachelor", "degree", degree="Associate of Science in Computer Science")[0] is False
+    assert cover("Computer Science", "degree", degree="B.S. in Computer Science")[0] is True
+    senior = JOBS["job-005"]["description"]                       # no "related field" here
+    assert cover("Computer Science", "degree", degree=bs_ce, description=senior) == (False, None)
+    covered, evidence = cover("Computer Science", "degree", degree=bs_ce)   # job-001 accepts related
+    assert covered and "related field" in evidence
+
+
+def test_experience_and_role_use_the_evidence_rules():
+    line = "Built client sites with React and Node.js."
+    assert cover("building websites", "experience", line, 0.47) == (True, line)
+    assert cover("customer data", "role", "Answered tickets and multi-customer support", 0.5) == (False, None)
 
 
 # ---------- the assessment built from the matches ----------
@@ -146,9 +190,10 @@ def test_nice_to_have_from_plus_bonus_preferred():
     assert nice_to_have_skills(JOBS["job-003"]["description"], ["Python", "Tableau"]) == ["Tableau"]
 
 
-def match(phrase, covered, evidence=None):
-    return {"phrase": phrase, "relevance": 0.5, "resume_similarity": 0.6 if covered else 0.2,
-            "covered": covered, "evidence": evidence}
+def match(phrase, best_line=None, similarity=0.2):
+    # what keypoints.match_phrases returns for one phrase
+    return {"phrase": phrase, "relevance": 0.5, "resume_similarity": similarity,
+            "best_line": best_line}
 
 
 @pytest.mark.parametrize("job_id, phrase, kind", [
@@ -172,9 +217,9 @@ def test_assessment_fields_and_interview_order():
     job = JOBS["job-001"]
     req = extract_requirements(job)
     b = score_match(STUDENT, job)["breakdown"]
-    matches = [match("internal tools", True, "Built internal tools in Java."),
-               match("Computer Science", False)]
-    a = embedding_assessment(job, b, req, matches)
+    matches = [match("internal tools", "Built internal tools in Java.", 0.6),
+               match("Computer Science")]
+    a = embedding_assessment(job, b, req, matches)            # no profile: no degree on file
     assert a["key_points"] == ["internal tools", "Computer Science"]
     assert "C++" in a["nice_to_have"] and "C++" not in a["required_skills"]
     assert "Computer Science" in a["gaps"]                    # a degree requirement
@@ -187,8 +232,7 @@ def test_assessment_fields_and_interview_order():
 def test_role_descriptions_are_never_gaps():
     job = JOBS["job-006"]
     b = score_match(STUDENT, job)["breakdown"]
-    matches = [match("designers", False), match("small business clients", False),
-               match("building websites", False)]
+    matches = [match("designers"), match("small business clients"), match("building websites")]
     a = embedding_assessment(job, b, extract_requirements(job), matches)
     assert a["key_points"] == ["designers", "small business clients", "building websites"]
     assert "designers" not in a["gaps"] and "small business clients" not in a["gaps"]
