@@ -5,6 +5,4 @@ data/*.pdf
 data/*.docx
 output/
 .env
-CLAUDE.md
-.claude/
 .venv/
