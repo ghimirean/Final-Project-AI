@@ -3,6 +3,7 @@
 Run from project root:  python -m pytest -v
 """
 import os
+import re
 import sys
 from datetime import date
 
@@ -186,3 +187,34 @@ def test_future_span_ends_at_the_sentence():
     text = "Wrote Java tools; future work: Docker. Used SQL daily."
     [(start, end)] = future_spans(text)
     assert text[start:end] == "future work: Docker"
+
+
+# ---------- academic season dates ----------
+
+from resume_parser import DATE_RANGE, extract_education, extract_experience, to_months  # noqa: E402
+
+
+@pytest.mark.parametrize("token, month", [
+    ("Spring 2024", 1), ("Summer 2024", 6), ("Fall 2024", 9), ("Autumn 2024", 9), ("Winter 2024", 12),
+    ("fall 2024", 9),
+])
+def test_season_is_a_fixed_month(token, month):
+    assert to_months(token) == 2024 * 12 + month
+    assert to_months(token, is_end=True) == 2024 * 12 + month     # same month as an end date
+
+
+def test_season_date_ranges():
+    jobs, years = extract_experience(["Orchard Valley University | Teaching Assistant",
+                                      "Fall 2023 - Spring 2024",
+                                      "Robotics Club | Software Lead",
+                                      "Summer 2022 – Fall 2023"])
+    assert [(j["dates"], j["months"]) for j in jobs] == [("Fall 2023 - Spring 2024", 5),
+                                                         ("Summer 2022 – Fall 2023", 16)]
+    assert re.search(DATE_RANGE, "Spring 2024 - Present").group(0) == "Spring 2024 - Present"
+
+
+def test_season_graduation_date():
+    edu = extract_education(["Orchard Valley University", "Bachelor of Science in Computer Science",
+                             "Expected Spring 2026"])
+    assert edu["graduation"] == "Spring 2026"
+    assert extract_education(["Some College", "May 2022"])["graduation"] == "May 2022"

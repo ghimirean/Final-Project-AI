@@ -210,7 +210,8 @@ def extract_education(lines):
     degree = next((l for l in lines
                    if re.search(r"\b(Bachelor|Master|Associate|Doctor|Ph\.?D|B\.S|M\.S|B\.A|M\.A|MBA)\b", l)), None)
     field = degree.split(" in ", 1)[1].strip() if degree and " in " in degree else None
-    graduation = find(r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.? \d{4}", text)
+    graduation = find(r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.? \d{4}"
+                      r"|(Spring|Summer|Fall|Autumn|Winter) \d{4}", text)
     return {
         "institution": institution,
         "degree": degree,
@@ -219,9 +220,13 @@ def extract_education(lines):
     }
 
 MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-          "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
-# One date can be "Aug 2024", "08/2024", or just "2024"
+          "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+          # Academic seasons ("Fall 2023"): each is one fixed month, so
+          # "Fall 2023 - Spring 2024" = Sep 2023 - Jan 2024 = 5 months
+          "spr": 1, "sum": 6, "fal": 9, "aut": 9, "win": 12}
+# One date can be "Aug 2024", "Fall 2023", "08/2024", or just "2024"
 DATE = (r"(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4}"
+        r"|(?:Spring|Summer|Fall|Autumn|Winter)\s+\d{4}"
         r"|\d{1,2}/\d{4}|\d{4})")
 DATE_RANGE = (r"\b(" + DATE + r")\s*(?:[–—-]|to)\s*(" + DATE
               + r"|Present|Current|Now)\b")
