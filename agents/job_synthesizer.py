@@ -21,10 +21,17 @@ WHAT AGENT 3 DOES
 -----------------
 1. Rule-based requirements (skills, years, degree) from each description.
 2. A 0-100 match score: skills + embedding similarity - penalties.
-   The score is always computed by code, never by the LLM.
-3. LLM key points (Groq): what the employer is really looking for, the
-   candidate's fit and gaps, and topics for the interview agent. If the
-   LLM fails, a rule-based version is used ("assessed_by": "llm" | "rules").
+   The score is always computed by code.
+3. Key points with embeddings (KeyBERT, agents/keypoints.py): the phrases
+   that capture what the posting is about, checked against the resume by
+   embedding similarity, which gives the candidate's fit, gaps and topics
+   for the interview agent. No LLM. If the embedding model is unavailable,
+   a rule-based version is used ("assessed_by": "embeddings" | "rules").
+   The older Groq LLM key points are still here but OFF by default
+   (rank_jobs(..., use_llm=True) turns them on; "assessed_by": "llm").
+
+Agent 3's kind of AI: semantic embeddings / semantic search (a local
+sentence-transformers model), not a generative LLM.
 """
 import json
 import os
@@ -40,10 +47,13 @@ from pydantic import BaseModel, Field
 from datetime import date
 
 from resume_parser import load_skills, extract_skills, to_months
-from embeddings import resume_job_similarities, EmbeddingError
+from embeddings import embed, resume_job_similarities, EmbeddingError
+from keypoints import extract_keyphrases, match_phrases, resume_lines
 from llm import ask_llm, LLMError
 
-# Agent 3's LLM. Change this one line to switch provider or model.
+# OPTIONAL LLM key points (OFF by default: Agent 3 uses embeddings, and
+# Agent 2 is the project's LLM agent). Kept for comparison; turn on with
+# rank_jobs(..., use_llm=True). Change this one line to switch model.
 # Chosen after comparing the Groq models available in Nov 2026 on the same
 # jobs: qwen3.8-27b stayed closest to the posting (no invented
 # "nice to have" skills), used the candidate's projects in its interview
@@ -376,8 +386,19 @@ def candidate_summary(profile, today=None):
     return "\n".join(lines)
 
 
+def requirement_gaps(req, breakdown):
+    # Years and degree gaps, in words (used by every key-point method)
+    gaps = []
+    if breakdown["experience_penalty"] > 0:
+        gaps.append(f"{req['min_years']}+ years of experience "
+                    f"(candidate has {breakdown['candidate_years']})")
+    if breakdown.get("degree_penalty", 0) > 0:
+        gaps.append(f"{req['degree']}'s degree")
+    return gaps
+
+
 def rule_based_assessment(job, breakdown, req):
-    """Fallback when the LLM is unavailable: the same fields, built from the
+    """Fallback when no model is available: the same fields, built from the
     rule-based requirements and the one-line reason."""
     key_points = []
     if req["skills"]:
@@ -386,12 +407,7 @@ def rule_based_assessment(job, breakdown, req):
         key_points.append(f"Experience: {req['min_years']}+ years")
     if req["degree"]:
         key_points.append(f"Degree: {req['degree']}'s")
-    gaps = list(breakdown["missing_skills"])
-    if breakdown["experience_penalty"] > 0:
-        gaps.append(f"{req['min_years']}+ years of experience "
-                    f"(candidate has {breakdown['candidate_years']})")
-    if breakdown.get("degree_penalty", 0) > 0:
-        gaps.append(f"{req['degree']}'s degree")
+    gaps = list(breakdown["missing_skills"]) + requirement_gaps(req, breakdown)
     # Ask about the job's skills: missing ones first (to probe the gap),
     # then matched ones (to check the claim)
     focus = (breakdown["missing_skills"] + breakdown["matched_skills"])[:5]
@@ -402,11 +418,92 @@ def rule_based_assessment(job, breakdown, req):
         "fit_summary": make_reason(breakdown),
         "gaps": gaps,
         "interview_focus": focus or [f"General fit for the {job['title']} role"],
+        "key_point_matches": [],
     }
 
 
-def assess_job(profile, job, result, skill_list=None, config=None):
-    """Key points for one job. Returns (assessment dict, "llm" or "rules").
+# ---------- Embedding key points (default) ----------
+
+# A sentence with one of these words lists optional skills ("C++ is a plus")
+NICE_TO_HAVE_CUES = r"\b(?:plus|bonus|preferred|nice to have|nice-to-have|desired|desirable|ideally)\b"
+MAX_FOCUS = 5
+
+
+def nice_to_have_skills(description, skills):
+    """The posting's skills that appear in a 'plus / bonus / preferred' sentence."""
+    nice = []
+    for sentence in re.split(r"(?<=[.!?])\s+", description):
+        if re.search(NICE_TO_HAVE_CUES, sentence, re.IGNORECASE):
+            nice += [s for s in extract_skills(sentence, skills) if s not in nice]
+    return nice
+
+
+def embedding_assessment(job, breakdown, req, matches):
+    """Key points from KeyBERT phrases + embedding matches against the resume.
+    matches: from keypoints.match_phrases(). Same fields as the other methods,
+    plus "key_point_matches" (the evidence behind every key point)."""
+    nice = nice_to_have_skills(job["description"], req["skills"])
+    missing = [s for s in breakdown["missing_skills"] if s not in nice]
+
+    def mentions_missing_skill(phrase):
+        return any(s.lower() in phrase.lower() for s in missing)
+
+    # Phrases the resume shows no sign of (and that aren't just a missing skill again)
+    uncovered = [m["phrase"] for m in matches
+                 if not m["covered"] and not mentions_missing_skill(m["phrase"])]
+    covered = [m for m in matches if m["covered"]]
+
+    # Interview: probe up to 3 gaps first, then ask for examples of what the
+    # resume claims, best-matching key points first
+    probes = [f"{x} (asked for, not on the resume)" for x in missing + uncovered][:3]
+    checks = [f"{m['phrase']} (ask for an example; resume: {m['evidence']})" for m in covered]
+    focus = (probes + checks)[:MAX_FOCUS]
+
+    reason = make_reason(breakdown)
+    summary = (f"{reason} The resume shows {len(covered)} of {len(matches)} key points "
+               "of the posting.") if matches else reason
+    return {
+        "key_points": [m["phrase"] for m in matches]
+                      or ["No specific requirements found in the posting"],
+        "required_skills": [s for s in req["skills"] if s not in nice],
+        "nice_to_have": nice,
+        "fit_summary": summary,
+        "gaps": missing + uncovered + requirement_gaps(req, breakdown),
+        "interview_focus": focus or [f"General fit for the {job['title']} role"],
+        "key_point_matches": matches,
+    }
+
+
+class KeyPointer:
+    """Makes key points for one resume across many jobs. The resume lines
+    are embedded once. If the embedding model fails once, every later job
+    goes straight to the rule-based version (one warning, not one per job)."""
+
+    def __init__(self, profile, skill_list):
+        self.profile, self.skill_list = profile, skill_list
+        self.lines, self.line_vectors, self.broken = None, None, False
+
+    def assess(self, job, breakdown):
+        req = extract_requirements(job, self.skill_list)
+        if not self.broken:
+            try:
+                phrases = extract_keyphrases(job["description"])
+                if self.lines is None:
+                    self.lines = resume_lines(resume_text(self.profile))
+                    self.line_vectors = embed(self.lines) if self.lines else None
+                matches = match_phrases(phrases, self.lines, self.profile.get("skills", []),
+                                        self.line_vectors)
+                return embedding_assessment(job, breakdown, req, matches), "embeddings"
+            except EmbeddingError as e:
+                self.broken = True
+                print(f"[Agent 3] Embedding key points unavailable ({e}); using rules.",
+                      file=sys.stderr)
+        return rule_based_assessment(job, breakdown, req), "rules"
+
+
+def assess_job(profile, job, result, skill_list=None, config=None, fallback=None):
+    """OPTIONAL LLM key points for one job. Returns (assessment, "llm"), or,
+    if the LLM fails, fallback() (or the rule-based version) instead.
     The LLM only explains; it never changes result["score"]."""
     config = config or LLM_CONFIG
     b = result["breakdown"]
@@ -417,26 +514,33 @@ def assess_job(profile, job, result, skill_list=None, config=None):
         title=job["title"], company=job["company"], description=job["description"],
         candidate=candidate_summary(profile))
     try:
-        return ask_llm(prompt, config["provider"], config["model"], schema=JobAssessment), "llm"
+        assessment = ask_llm(prompt, config["provider"], config["model"], schema=JobAssessment)
+        return dict(assessment, key_point_matches=[]), "llm"
     except LLMError as e:
-        print(f"[Agent 3] LLM key points failed for {job['id']} ({e}); using rules.", file=sys.stderr)
+        print(f"[Agent 3] LLM key points failed for {job['id']} ({e}); using fallback.",
+              file=sys.stderr)
+        if fallback:
+            return fallback()
         req = extract_requirements(job, skill_list)
         return rule_based_assessment(job, b, req), "rules"
 
 
-def rank_jobs(profile, jobs, use_llm=True, top_n=None):
+def rank_jobs(profile, jobs, use_llm=False, top_n=None):
     """Scores every job for this profile and returns them best-first.
     Each result keeps the job's fields and adds score, matched_skills,
     missing_skills, reason, the full breakdown, the key-point "assessment",
-    and "assessed_by" ("llm" or "rules").
+    and "assessed_by" ("embeddings", "rules" or "llm").
 
-    Only the top_n best-scoring jobs (default LLM_CONFIG["top_n"]) get LLM
-    key points; the others get the rule-based version.
-    use_llm=False skips the LLM for every job.
+    Default: embedding key points (KeyBERT) for every job; rules if the
+    embedding model is unavailable. No LLM.
+    use_llm=True (optional): the top_n best-scoring jobs (default
+    LLM_CONFIG["top_n"]) get Groq key points instead; if Groq fails, they
+    fall back to the embedding version.
     """
     if top_n is None:
         top_n = LLM_CONFIG.get("top_n", 5)
     skill_list = load_skills(SKILLS_PATH)      # load once, not once per job
+    pointer = KeyPointer(profile, skill_list)
 
     # 1) Score every job, then sort, so we know which jobs are the top N
     scored = []
@@ -444,15 +548,16 @@ def rank_jobs(profile, jobs, use_llm=True, top_n=None):
         scored.append((job, score_match(profile, job, skill_list, text_score=text_score)))
     scored.sort(key=lambda pair: pair[1]["score"], reverse=True)
 
-    # 2) Key points: LLM for the top N, rules for the rest
+    # 2) Key points: embeddings for every job (or, optionally, Groq for the top N)
     ranked = []
     for position, (job, result) in enumerate(scored):
         b = result["breakdown"]
         if use_llm and position < top_n:
-            assessment, assessed_by = assess_job(profile, job, result, skill_list)
+            assessment, assessed_by = assess_job(
+                profile, job, result, skill_list,
+                fallback=lambda job=job, b=b: pointer.assess(job, b))
         else:
-            req = extract_requirements(job, skill_list)
-            assessment, assessed_by = rule_based_assessment(job, b, req), "rules"
+            assessment, assessed_by = pointer.assess(job, b)
         ranked.append({
             "id": job["id"],
             "title": job["title"],
@@ -501,16 +606,18 @@ def save_json(data, out_path):
 
 
 if __name__ == "__main__":
-    # python agents/job_synthesizer.py [resume] [jobs.json] [--rules]
+    # python agents/job_synthesizer.py [resume] [jobs.json] [--rules] [--llm]
+    #   --rules: rule-based resume parser instead of the NER model
+    #   --llm:   optional Groq key points for the top jobs (needs GROQ_API_KEY)
     from resume_parser import parse_resume, parse_resume_ner
 
-    use_llm = "--rules" not in sys.argv
-    args = [a for a in sys.argv[1:] if a != "--rules"]
+    use_llm = "--llm" in sys.argv
+    args = [a for a in sys.argv[1:] if a not in ("--rules", "--llm")]
     resume_path = args[0] if len(args) > 0 else os.path.join(ROOT, "data", "sample.pdf")
     jobs_path = args[1] if len(args) > 1 else os.path.join(ROOT, "tests", "fixtures", "jobs.json")
     out_path = os.path.join(ROOT, "output", "ranked_jobs.json")
 
-    parse = parse_resume_ner if use_llm else parse_resume
+    parse = parse_resume if "--rules" in sys.argv else parse_resume_ner
     profile = parse(resume_path, skills_path=SKILLS_PATH)
     ranked = rank_jobs(profile, load_jobs(jobs_path), use_llm=use_llm)
     print(f"Resume parsed by: {profile['parsed_by']}\n")

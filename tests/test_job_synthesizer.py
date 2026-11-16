@@ -200,7 +200,7 @@ def test_bs_ms_pair_counts_lowest_degree():
 
 
 
-# ---------- Step 3: LLM key points (Groq is always faked) ----------
+# ---------- Optional LLM key points (off by default; Groq is always faked) ----------
 
 GOOD_ASSESSMENT = {
     "key_points": ["Write internal tools in Java", "Solid OOP and data structures"],
@@ -236,15 +236,15 @@ def fake_groq(monkeypatch):
 
 def test_llm_key_points(fake_groq):
     fake_groq(GOOD_ASSESSMENT)
-    ranked = rank_jobs(STUDENT, [JOBS["job-001"]])
+    ranked = rank_jobs(STUDENT, [JOBS["job-001"]], use_llm=True)
     assert ranked[0]["assessed_by"] == "llm"
-    assert ranked[0]["assessment"] == GOOD_ASSESSMENT
+    assert ranked[0]["assessment"] == dict(GOOD_ASSESSMENT, key_point_matches=[])
 
 
 def test_llm_does_not_change_the_score(fake_groq):
     # Even if the LLM sends its own "score", it is dropped by the schema
     fake_groq(dict(GOOD_ASSESSMENT, score=5))
-    with_llm = rank_jobs(STUDENT, list(JOBS.values()))
+    with_llm = rank_jobs(STUDENT, list(JOBS.values()), use_llm=True)
     without_llm = rank_jobs(STUDENT, list(JOBS.values()), use_llm=False)
     assert [(r["id"], r["score"]) for r in with_llm] == [(r["id"], r["score"]) for r in without_llm]
     assert "score" not in with_llm[0]["assessment"]
@@ -252,7 +252,7 @@ def test_llm_does_not_change_the_score(fake_groq):
 
 def test_prompt_contents(fake_groq):
     calls = fake_groq(GOOD_ASSESSMENT)
-    rank_jobs(PERSON, [JOBS["job-001"]])
+    rank_jobs(PERSON, [JOBS["job-001"]], use_llm=True)
     prompt = calls[0]["prompt"]
     assert calls[0]["model"] == LLM_CONFIG["model"]
     assert "api.groq.com" in calls[0]["url"]
@@ -276,16 +276,17 @@ def test_candidate_summary_has_no_contact_details():
     dict(GOOD_ASSESSMENT, key_points=[]),                                # empty key points
     dict(GOOD_ASSESSMENT, fit_summary=""),                               # empty summary
 ])
-def test_bad_llm_reply_falls_back_to_rules(fake_groq, bad_reply):
+def test_bad_llm_reply_falls_back(fake_groq, bad_reply):
+    # Groq fails -> embedding key points; conftest blocks those too -> rules
     fake_groq(bad_reply)
-    ranked = rank_jobs(STUDENT, [JOBS["job-001"]])
+    ranked = rank_jobs(STUDENT, [JOBS["job-001"]], use_llm=True)
     assert ranked[0]["assessed_by"] == "rules"
     assert ranked[0]["assessment"]["fit_summary"] == ranked[0]["reason"]
 
 
 def test_api_down_falls_back_to_rules():
-    # conftest.py blocks the network: every job gets rule-based key points
-    ranked = rank_jobs(STUDENT, list(JOBS.values()))
+    # conftest.py blocks the network and KeyBERT: every job gets rule-based key points
+    ranked = rank_jobs(STUDENT, list(JOBS.values()), use_llm=True)
     assert {r["assessed_by"] for r in ranked} == {"rules"}
 
 
@@ -293,7 +294,7 @@ def test_rule_based_assessment_for_senior_role():
     result = score_match(STUDENT, JOBS["job-005"])
     req = extract_requirements(JOBS["job-005"])
     a = rule_based_assessment(JOBS["job-005"], result["breakdown"], req)
-    assert set(a) == set(GOOD_ASSESSMENT)                     # same fields as the LLM version
+    assert set(a) == set(GOOD_ASSESSMENT) | {"key_point_matches"}   # same fields as the LLM version
     assert "Experience: 5+ years" in a["key_points"]
     assert any("5+ years" in gap for gap in a["gaps"])
     assert a["interview_focus"][0] == result["breakdown"]["missing_skills"][0]   # gaps first
@@ -319,7 +320,7 @@ def test_assess_job_returns_source(fake_groq):
 
 def test_only_top_n_jobs_use_llm(fake_groq):
     calls = fake_groq(GOOD_ASSESSMENT)
-    ranked = rank_jobs(STUDENT, list(JOBS.values()))          # 6 jobs, default top_n
+    ranked = rank_jobs(STUDENT, list(JOBS.values()), use_llm=True)   # 6 jobs, default top_n
     top_n = LLM_CONFIG["top_n"]
     assert top_n == 5
     assert len(calls) == top_n
@@ -328,7 +329,7 @@ def test_only_top_n_jobs_use_llm(fake_groq):
 
 def test_llm_jobs_are_the_highest_scoring(fake_groq):
     calls = fake_groq(GOOD_ASSESSMENT)
-    ranked = rank_jobs(STUDENT, list(JOBS.values()), top_n=2)
+    ranked = rank_jobs(STUDENT, list(JOBS.values()), use_llm=True, top_n=2)
     assert len(calls) == 2
     # The two LLM calls were about the two best-scoring jobs
     assert ranked[0]["title"] in calls[0]["prompt"] and ranked[1]["title"] in calls[1]["prompt"]
@@ -341,13 +342,13 @@ def test_llm_jobs_are_the_highest_scoring(fake_groq):
 def test_top_n_from_config(fake_groq, monkeypatch):
     calls = fake_groq(GOOD_ASSESSMENT)
     monkeypatch.setitem(LLM_CONFIG, "top_n", 1)
-    rank_jobs(STUDENT, list(JOBS.values()))
+    rank_jobs(STUDENT, list(JOBS.values()), use_llm=True)
     assert len(calls) == 1
 
 
 def test_top_n_zero_means_no_llm_calls(fake_groq):
     calls = fake_groq(GOOD_ASSESSMENT)
-    ranked = rank_jobs(STUDENT, list(JOBS.values()), top_n=0)
+    ranked = rank_jobs(STUDENT, list(JOBS.values()), use_llm=True, top_n=0)
     assert calls == [] and {r["assessed_by"] for r in ranked} == {"rules"}
 
 
@@ -384,7 +385,7 @@ def test_prompt_tells_llm_about_relevant_experience_and_degree(fake_groq):
     calls = fake_groq(GOOD_ASSESSMENT)
     student = dict(STUDENT, education={"degree": "Bachelor of Science in Computer Science",
                                        "graduation": "May 2099"})
-    rank_jobs(student, [JOBS["job-005"]])
+    rank_jobs(student, [JOBS["job-005"]], use_llm=True)
     prompt = calls[0]["prompt"]
     assert "count only jobs and projects that are relevant" in prompt
     assert "do NOT count" in prompt
