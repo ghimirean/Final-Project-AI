@@ -1,0 +1,25 @@
+# Other spellings of skills in data/skills.txt.  Format:  Alias = Canonical
+# The canonical name must be a line in data/skills.txt. Agent 1 and Agent 3
+# report every alias under its canonical name, so "Microsoft Excel" and
+# "Excel" are the same skill. Matching follows the skills.txt rules: whole
+# words, any case, except names of 1-2 characters ("ML", "JS") match exact case.
+# Only add aliases that are unambiguous in a resume or job posting.
+Object-Oriented Programming = OOP
+Object Oriented Programming = OOP
+Microsoft Excel = Excel
+MS Excel = Excel
+Microsoft PowerPoint = PowerPoint
+MS PowerPoint = PowerPoint
+JS = JavaScript
+NodeJS = Node.js
+Node JS = Node.js
+REST APIs = REST API
+RESTful API = REST API
+RESTful APIs = REST API
+ML = Machine Learning
+Natural Language Processing = NLP
+Amazon Web Services = AWS
+PowerBI = Power BI
+sklearn = scikit-learn
+scikit learn = scikit-learn
+C Sharp = C#

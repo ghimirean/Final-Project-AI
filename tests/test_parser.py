@@ -11,7 +11,9 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "agents"))
 
-from resume_parser import parse_resume, remove_urls, extract_projects  # noqa: E402
+from resume_parser import (  # noqa: E402
+    canonical_skill, extract_projects, extract_skills, load_skills, parse_resume, remove_urls,
+)
 
 FIXTURES = os.path.join(ROOT, "tests", "fixtures")
 SKILLS = os.path.join(ROOT, "data", "skills.txt")
@@ -142,3 +144,21 @@ def test_every_project_has_the_same_fields():
     projects = extract_projects(["Chess Bot | Solo 2023", "- Wrote it in Python"], ["Python"])
     assert projects == [{"name": "Chess Bot", "role": "Solo", "date": "2023",
                          "summary": "Wrote it in Python", "skills": ["Python"]}]
+
+
+# ---------- skill aliases (data/skill_aliases.txt) ----------
+
+SKILL_LIST = load_skills(os.path.join(ROOT, "data", "skills.txt"))
+
+
+def test_aliases_give_one_canonical_name():
+    text = "Microsoft Excel, MS PowerPoint, Object-Oriented Programming (OOP), RESTful APIs"
+    assert extract_skills(text, SKILL_LIST) == ["Excel", "PowerPoint", "OOP", "REST API"]
+    assert canonical_skill("object oriented programming") == "OOP"
+    assert canonical_skill("Kubernetes") == "Kubernetes"          # unknown names unchanged
+
+
+def test_short_aliases_need_exact_case():
+    assert extract_skills("ML pipelines", SKILL_LIST) == ["Machine Learning"]
+    assert extract_skills("html markup", ["Machine Learning"]) == []
+    assert extract_skills("I like the ml in html", ["Machine Learning"]) == []
