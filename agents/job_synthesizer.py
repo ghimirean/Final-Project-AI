@@ -502,7 +502,7 @@ def save_json(data, out_path):
 
 if __name__ == "__main__":
     # python agents/job_synthesizer.py [resume] [jobs.json] [--rules]
-    from resume_parser import parse_resume, parse_resume_llm
+    from resume_parser import parse_resume, parse_resume_ner
 
     use_llm = "--rules" not in sys.argv
     args = [a for a in sys.argv[1:] if a != "--rules"]
@@ -510,7 +510,7 @@ if __name__ == "__main__":
     jobs_path = args[1] if len(args) > 1 else os.path.join(ROOT, "tests", "fixtures", "jobs.json")
     out_path = os.path.join(ROOT, "output", "ranked_jobs.json")
 
-    parse = parse_resume_llm if use_llm else parse_resume
+    parse = parse_resume_ner if use_llm else parse_resume
     profile = parse(resume_path, skills_path=SKILLS_PATH)
     ranked = rank_jobs(profile, load_jobs(jobs_path), use_llm=use_llm)
     print(f"Resume parsed by: {profile['parsed_by']}\n")

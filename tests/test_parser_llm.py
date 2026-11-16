@@ -173,15 +173,15 @@ def test_fallback_when_key_missing(monkeypatch):
 
 # ---------- pipeline uses the LLM by default ----------
 
-def test_pipeline_uses_llm_by_default(fake_gemini):
+def test_pipeline_can_use_the_llm_parser(fake_gemini):
     fake_gemini(json.dumps(GOOD_REPLY))
-    result = run_pipeline(RESUME, JOBS)
+    result = run_pipeline(RESUME, JOBS, parser="llm")
     assert result["profile"]["parsed_by"] == "llm"
     assert "raw_text" not in result["profile"]
 
 
 def test_pipeline_can_skip_llm(fake_gemini):
     calls = fake_gemini(json.dumps(GOOD_REPLY))
-    result = run_pipeline(RESUME, JOBS, use_llm=False)
-    assert result["profile"]["parsed_by"] == "rules"
+    result = run_pipeline(RESUME, JOBS, use_llm=False, parser="llm")
+    assert result["profile"]["parsed_by"] == "rules"           # no API calls -> rules
     assert calls == []                                        # no API call made

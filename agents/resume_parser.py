@@ -1,11 +1,15 @@
-"""Agent 1: Resume Parser.
+"""Agent 1: Resume Parser, an NLP named-entity-recognition (NER) agent.
 
-parse_resume_llm(path)  LLM agent (default): Gemini reads the resume and
-                        returns the profile; falls back to the rules below
-                        if the LLM fails or returns bad output.
-parse_resume(path)      Rule-based parser (regex + keyword list).
-Both return the same profile format, with "parsed_by": "llm" or "rules".
+parse_resume_ner(path)  DEFAULT. A spaCy NER model, fine-tuned on annotated
+                        resumes (scripts/train_ner.py), finds PERSON, ORG,
+                        DEGREE, JOB_TITLE, SKILL and DATE entities, and Python
+                        assembles them into the profile. Falls back to the
+                        rule-based parser if the model can't be loaded.
+parse_resume_llm(path)  Alternative: Gemini reads the resume (kept for comparison).
+parse_resume(path)      Rule-based parser (regex + keyword list), the fallback.
+All return the same profile format, with "parsed_by": "ner", "llm" or "rules".
 """
+import bisect
 from datetime import date
 from typing import List, Optional
 import re
@@ -18,7 +22,11 @@ from pydantic import BaseModel, Field
 
 from llm import ask_llm, LLMError
 
-# Agent 1's model. Change this one line to switch provider or model.
+# Agent 1's NER model (built by scripts/train_ner.py). Change this line to use another.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+NER_CONFIG = {"model_path": os.path.join(ROOT, "models", "resume_ner")}
+
+# Model for the alternative LLM parser. Change this one line to switch provider or model.
 LLM_CONFIG = {"provider": "gemini", "model": "gemini-3.5-flash"}
 
 
@@ -407,6 +415,161 @@ def parse_resume_llm(path, skills_path="data/skills.txt", config=None):
         print(f"[Agent 1] LLM parsing failed ({e}); using rule-based parser.", file=sys.stderr)
         return parse_resume(path, skills_path)
 
+# ---------- NER version (default) ----------
+
+class NERUnavailable(Exception):
+    """The NER model can't be loaded (not trained yet, spaCy missing, ...)."""
+
+
+_ner_model = None      # loaded once, then reused
+
+
+def _load_ner_model():
+    # The only function that loads the model. Tests replace it with a fake.
+    global _ner_model
+    if _ner_model is None:
+        try:
+            import spacy
+            _ner_model = spacy.load(NER_CONFIG["model_path"])
+        except Exception as e:
+            raise NERUnavailable(f"can't load {NER_CONFIG['model_path']}: {type(e).__name__}") from None
+    return _ner_model
+
+
+def ner_entities(nlp, text):
+    """Runs the model and returns its entities as simple dicts, each with
+    the line number it's on (layout is used to group them into jobs)."""
+    line_starts = [0] + [i + 1 for i, ch in enumerate(text) if ch == "\n"]
+    return [{"label": ent.label_, "text": ent.text.strip(), "start": ent.start_char,
+             "end": ent.end_char, "line": bisect.bisect_right(line_starts, ent.start_char) - 1}
+            for ent in nlp(text).ents]
+
+
+def parse_date(token, is_end=False):
+    # Month count for a DATE entity, or None if it isn't a real date
+    # (the model sometimes tags words like "weekly" or "three years" as DATE)
+    try:
+        return to_months(token, is_end=is_end)
+    except (ValueError, KeyError, IndexError):
+        return None
+
+
+# Sections whose titles are not jobs (project roles, club roles, awards)
+NON_JOB_SECTIONS = ["PROJECT", "LEADERSHIP", "ACTIVITIES", "ACHIEVEMENTS", "AWARDS",
+                    "CERTIFICATIONS"]
+
+
+def non_job_lines(text):
+    # Line numbers inside sections where a JOB_TITLE entity can't be a real job
+    lines, inside = set(), False
+    for i, line in enumerate(text.split("\n")):
+        if is_heading(line.strip()):
+            inside = any(k in line.upper() for k in NON_JOB_SECTIONS)
+        elif inside:
+            lines.add(i)
+    return lines
+
+
+def build_profile_from_ner(ents, text, skill_list):
+    """Turns NER entities into the exact parse_resume() format.
+    The model finds the pieces; layout groups them; Python does the math."""
+    by_label = lambda label: [e for e in ents if e["label"] == label]
+
+    # Contact: name from NER; email/phone/links have fixed patterns, so regex
+    profile = extract_contact(text.split("\n"))
+    persons = by_label("PERSON")
+    name = persons[0]["text"] if persons else profile["name"]
+    profile["name"] = name.title() if name and name.isupper() else name
+
+    # Skills: every SKILL entity outside a link, spelled like skills.txt when listed there
+    canonical = {s.lower(): s for s in skill_list}
+    links = [(m.start(), m.end()) for m in re.finditer(URL_PATTERN, text, re.IGNORECASE)]
+    skills = []
+    for e in by_label("SKILL"):
+        if any(s <= e["start"] < t for s, t in links):
+            continue
+        skill = canonical.get(e["text"].lower(), e["text"])
+        if skill not in skills:
+            skills.append(skill)
+
+    # Education: the first DEGREE, the school (ORG) from 2 lines above to 1
+    # line below it, and the first real date from 1 line above to 1 below
+    # (e.g. "School \n City, State May 2028 \n Degree")
+    education = {"institution": None, "degree": None, "field": None, "graduation": None}
+    education_lines = set()
+    degrees = by_label("DEGREE")
+    if degrees:
+        d = degrees[0]
+        education["degree"] = d["text"]
+        if " in " in d["text"]:
+            education["field"] = d["text"].split(" in ", 1)[1].strip()
+        near = lambda e, before, after: d["line"] - before <= e["line"] <= d["line"] + after
+        schools = [e for e in by_label("ORG") if near(e, 2, 1)]
+        schools.sort(key=lambda e: (not re.search(r"University|College|Institute|School", e["text"]),
+                                    abs(e["line"] - d["line"])))
+        if schools:
+            education["institution"] = schools[0]["text"]
+            education_lines.add(schools[0]["line"])
+        grad = [e for e in by_label("DATE") if near(e, 1, 1) and parse_date(e["text"]) is not None]
+        grad.sort(key=lambda e: (e["line"] < d["line"], e["start"]))   # prefer on/after the degree
+        if grad:
+            education["graduation"] = grad[0]["text"]
+            education_lines.add(grad[0]["line"])
+        education_lines.add(d["line"])
+
+    # Jobs: one per line that has a JOB_TITLE (not in Education or a
+    # Projects/Leadership/Awards-type section).
+    # Company = ORG on the same line, else the line above/below.
+    # Dates = the first two real dates from the title's line to 2 lines below.
+    skip = non_job_lines(text) | education_lines
+    title_lines = sorted({e["line"] for e in by_label("JOB_TITLE") if e["line"] not in skip})
+    used_orgs, jobs = set(), []
+    for n, line in enumerate(title_lines):
+        title = next(e for e in by_label("JOB_TITLE") if e["line"] == line)
+        next_title = title_lines[n + 1] if n + 1 < len(title_lines) else float("inf")
+        orgs = [e for e in by_label("ORG") if abs(e["line"] - line) <= 1
+                and e["line"] not in education_lines and e["start"] not in used_orgs
+                and (e["line"] <= line or e["line"] < next_title)]
+        orgs.sort(key=lambda e: abs(e["line"] - line))
+        company = orgs[0] if orgs else None
+        if company:
+            used_orgs.add(company["start"])
+        dates = [e for e in by_label("DATE") if line <= e["line"] <= line + 2
+                 and e["line"] < next_title and parse_date(e["text"]) is not None]
+        job = {"company": company["text"] if company else None, "title": title["text"],
+               "dates": None, "months": 0}
+        if len(dates) >= 2:
+            start, end = parse_date(dates[0]["text"]), parse_date(dates[1]["text"], is_end=True)
+            if end >= start:
+                job["dates"] = text[dates[0]["start"]:dates[1]["end"]]
+                job["months"] = end - start + 1
+        jobs.append(job)
+
+    profile["skills"] = skills
+    profile["education"] = education
+    profile["experience"] = jobs
+    profile["experience_years"] = round(sum(j["months"] for j in jobs) / 12, 1)
+    # Projects aren't an NER label, so the rule-based project reader is reused
+    profile["projects"] = extract_projects(get_section(split_sections(text), "PROJECT"), skill_list)
+    profile["parsed_by"] = "ner"
+    profile["raw_text"] = text
+    return profile
+
+
+def parse_resume_ner(path, skills_path="data/skills.txt"):
+    """NER-based Agent 1 (default). Same output format as parse_resume().
+    If the model can't be loaded or fails, falls back to the rule-based
+    parser (parsed_by = "rules")."""
+    text = read_resume(path)
+    try:
+        nlp = _load_ner_model()
+        ents = ner_entities(nlp, text)
+    except Exception as e:                         # model missing or broken
+        print(f"[Agent 1] NER model unavailable ({e}); using rule-based parser.", file=sys.stderr)
+        return parse_resume(path, skills_path)
+    return build_profile_from_ner(ents, text, load_skills(skills_path))
+
+
 def save_profile(profile, out_path="output/profile.json"):
     # Creates the output folder if needed; ensure_ascii=False keeps
     # characters like "é" readable instead of "é"
@@ -416,10 +579,15 @@ def save_profile(profile, out_path="output/profile.json"):
 
 
 if __name__ == "__main__":
-    # python agents/resume_parser.py [resume path] [--rules]
-    args = [a for a in sys.argv[1:] if a != "--rules"]
+    # python agents/resume_parser.py [resume path] [--rules | --llm]   (default: NER)
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
     path = args[0] if args else "data/sample.pdf"
-    profile = parse_resume(path) if "--rules" in sys.argv else parse_resume_llm(path)
+    if "--rules" in sys.argv:
+        profile = parse_resume(path)
+    elif "--llm" in sys.argv:
+        profile = parse_resume_llm(path)
+    else:
+        profile = parse_resume_ner(path)
     save_profile(profile)
     # raw_text is saved to the file but left out of the printout to keep it readable
     printable = {k: v for k, v in profile.items() if k != "raw_text"}
