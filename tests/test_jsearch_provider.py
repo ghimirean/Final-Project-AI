@@ -5,6 +5,7 @@ returns canned JSON. All data here is fake.
 
 Run from project root:  python -m pytest -v
 """
+import json
 import os
 import sys
 
@@ -62,7 +63,8 @@ def fake_get(monkeypatch, response):
 
 @pytest.fixture
 def provider():
-    return jp.JSearchProvider(api_key=KEY)
+    # cache_path=None: these tests never read or write a real cache file
+    return jp.JSearchProvider(api_key=KEY, cache_path=None)
 
 
 # ---------- building the request ----------
@@ -155,7 +157,7 @@ def test_missing_key_raises_without_making_a_request(monkeypatch):
     monkeypatch.delenv("RAPIDAPI_KEY", raising=False)
     seen = fake_get(monkeypatch, FakeResponse(200, v2(raw_job(1))))
     with pytest.raises(jp.ProviderError, match="RAPIDAPI_KEY"):
-        jp.JSearchProvider(api_key="").search({}, 10)
+        jp.JSearchProvider(api_key="", cache_path=None).search({}, 10)
     assert seen == {}
 
 
@@ -199,3 +201,120 @@ def test_api_key_never_appears_in_error_messages(monkeypatch, provider, response
     with pytest.raises(jp.ProviderError) as error:
         provider.search({}, 10)
     assert KEY not in str(error.value)
+
+
+# ---------- on-disk cache (tmp_path only, never output/) ----------
+
+QUERY = {"title": "Data Analyst", "keywords": ["Python"], "location": "Louisiana"}
+QUERY_TEXT = "Data Analyst Python in Louisiana"
+
+
+def counting_get(monkeypatch, *responses):
+    """Replaces requests.get with one that returns the given responses in
+    order and counts the calls."""
+    calls = []
+    responses = list(responses)
+
+    def get(url, headers=None, params=None, timeout=None):
+        calls.append(params["query"])
+        return responses.pop(0)
+
+    monkeypatch.setattr(jp.requests, "get", get)
+    return calls
+
+
+@pytest.fixture
+def cache_file(tmp_path):
+    return str(tmp_path / "jsearch_cache.json")
+
+
+@pytest.fixture
+def cached_provider(cache_file):
+    return jp.JSearchProvider(api_key=KEY, cache_path=cache_file)
+
+
+def test_default_cache_path_is_in_output():
+    assert jp.DEFAULT_CACHE_PATH.endswith(os.path.join("output", "jsearch_cache.json"))
+    assert jp.JSearchProvider(api_key=KEY).cache_path == jp.DEFAULT_CACHE_PATH
+
+
+def test_cache_hit_skips_the_http_call(monkeypatch, cached_provider, cache_file):
+    calls = counting_get(monkeypatch, FakeResponse(200, v2(raw_job(1))))
+    first = cached_provider.search(QUERY, 10)
+    second = cached_provider.search(QUERY, 10)
+    assert calls == [QUERY_TEXT]                      # only one real request
+    assert second == first and first[0]["id"] == "uid-1"
+    with open(cache_file, encoding="utf-8") as f:
+        assert list(json.load(f)) == [QUERY_TEXT]     # keyed by the final query text
+
+
+def test_cache_is_shared_between_provider_instances(monkeypatch, cache_file):
+    calls = counting_get(monkeypatch, FakeResponse(200, v2(raw_job(1))))
+    jp.JSearchProvider(api_key=KEY, cache_path=cache_file).search(QUERY, 10)
+    jp.JSearchProvider(api_key=KEY, cache_path=cache_file).search(QUERY, 10)
+    assert len(calls) == 1
+
+
+def test_different_query_is_not_a_cache_hit(monkeypatch, cached_provider):
+    calls = counting_get(monkeypatch, FakeResponse(200, v2(raw_job(1))),
+                         FakeResponse(200, v2(raw_job(2))))
+    cached_provider.search(QUERY, 10)
+    cached_provider.search({**QUERY, "location": "Texas"}, 10)
+    assert len(calls) == 2
+
+
+def test_expired_entry_is_refreshed(monkeypatch, cached_provider):
+    calls = counting_get(monkeypatch, FakeResponse(200, v2(raw_job(1))),
+                         FakeResponse(200, v2(raw_job(2))))
+    now = [1_000_000.0]
+    monkeypatch.setattr(jp.time, "time", lambda: now[0])
+    cached_provider.search(QUERY, 10)
+    now[0] += jp.CACHE_TTL_SECONDS - 1                # still fresh
+    assert cached_provider.search(QUERY, 10)[0]["id"] == "uid-1"
+    now[0] += 2                                       # now older than 24 hours
+    assert cached_provider.search(QUERY, 10)[0]["id"] == "uid-2"
+    assert len(calls) == 2
+    now[0] += 1                                       # the refreshed entry is used
+    assert cached_provider.search(QUERY, 10)[0]["id"] == "uid-2"
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("response", [
+    FakeResponse(429, {}), FakeResponse(500, {}), FakeResponse(200, ValueError("bad")),
+])
+def test_errors_are_not_cached(monkeypatch, cached_provider, cache_file, response):
+    calls = counting_get(monkeypatch, response, FakeResponse(200, v2(raw_job(1))))
+    with pytest.raises(jp.ProviderError):
+        cached_provider.search(QUERY, 10)
+    assert not os.path.exists(cache_file)
+    assert len(cached_provider.search(QUERY, 10)) == 1   # next call asks JSearch again
+    assert len(calls) == 2
+
+
+def test_empty_results_are_not_cached(monkeypatch, cached_provider, cache_file):
+    calls = counting_get(monkeypatch, FakeResponse(200, v2()),
+                         FakeResponse(200, v2(raw_job(1))))
+    assert cached_provider.search(QUERY, 10) == []
+    assert not os.path.exists(cache_file)
+    assert len(cached_provider.search(QUERY, 10)) == 1
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("content", ["{not json", "[1, 2, 3]",
+                                     '{"Data Analyst Python in Louisiana": "oops"}'])
+def test_corrupt_cache_file_is_ignored(monkeypatch, cached_provider, cache_file, content):
+    with open(cache_file, "w", encoding="utf-8") as f:
+        f.write(content)
+    calls = counting_get(monkeypatch, FakeResponse(200, v2(raw_job(1))))
+    assert cached_provider.search(QUERY, 10)[0]["id"] == "uid-1"
+    assert len(calls) == 1
+    with open(cache_file, encoding="utf-8") as f:     # rewritten as a valid cache
+        assert QUERY_TEXT in json.load(f)
+
+
+def test_no_cache_when_cache_path_is_none(monkeypatch, provider):
+    calls = counting_get(monkeypatch, FakeResponse(200, v2(raw_job(1))),
+                         FakeResponse(200, v2(raw_job(1))))
+    provider.search(QUERY, 10)
+    provider.search(QUERY, 10)
+    assert len(calls) == 2

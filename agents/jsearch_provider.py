@@ -6,8 +6,17 @@ location, url, description) for normalize_job() to clean.
 
 The key comes from .env (see .env.example): RAPIDAPI_KEY. It is sent in a
 request header and never appears in error messages.
+
+Results are cached on disk (output/jsearch_cache.json, git-ignored) for 24
+hours, keyed by the final query text, so repeating a search doesn't use up
+the free plan's 200 requests a month. Only successful, non-empty results are
+cached. Delete the file to get fresh results; pass cache_path=None to turn
+the cache off.
 """
+import json
+import logging
 import os
+import time
 
 import requests
 from dotenv import load_dotenv
@@ -21,6 +30,10 @@ URL = "https://jsearch.p.rapidapi.com/search-v2"
 HOST = "jsearch.p.rapidapi.com"
 TIMEOUT_SECONDS = 30
 MAX_QUERY_KEYWORDS = 2    # long free-text queries often match nothing
+DEFAULT_CACHE_PATH = os.path.join(ROOT, "output", "jsearch_cache.json")
+CACHE_TTL_SECONDS = 24 * 60 * 60
+
+log = logging.getLogger(__name__)
 
 
 class ProviderError(Exception):
@@ -31,8 +44,9 @@ class ProviderError(Exception):
 class JSearchProvider(JobProvider):
     name = "jsearch"
 
-    def __init__(self, api_key=None):
+    def __init__(self, api_key=None, cache_path=DEFAULT_CACHE_PATH):
         self.api_key = api_key or os.environ.get("RAPIDAPI_KEY")
+        self.cache_path = cache_path      # None = no caching
 
     def build_query_text(self, query):
         """Agent 2 query dict -> one free-text JSearch query, e.g.
@@ -51,8 +65,18 @@ class JSearchProvider(JobProvider):
         # allows 200 requests a month. `limit` is applied by search_jobs().
         if not self.api_key:
             raise ProviderError("RAPIDAPI_KEY is not set (add to .env)")
+        text = self.build_query_text(query)
+        cached = self._cache_get(text)
+        if cached is not None:
+            return cached
+        jobs = self._fetch(text)
+        if jobs:                          # never cache empty results (or errors)
+            self._cache_put(text, jobs)
+        return jobs
+
+    def _fetch(self, text):
         headers = {"X-RapidAPI-Key": self.api_key, "X-RapidAPI-Host": HOST}
-        params = {"query": self.build_query_text(query), "num_pages": 1, "country": "us"}
+        params = {"query": text, "num_pages": 1, "country": "us"}
         try:
             response = requests.get(URL, headers=headers, params=params,
                                     timeout=TIMEOUT_SECONDS)
@@ -72,6 +96,53 @@ class JSearchProvider(JobProvider):
         # /search-v2 returns {"jobs": [...], "cursor": "..."}; a plain list also works
         jobs = data.get("jobs") if isinstance(data, dict) else data
         return [parse_job(item) for item in (jobs or []) if isinstance(item, dict)]
+
+    # ---------- on-disk cache ----------
+
+    def _cache_load(self):
+        """The whole cache as {query text: {"time", "jobs"}}. A missing or
+        corrupt file counts as an empty cache: the cache must never break a search."""
+        try:
+            with open(self.cache_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as e:
+            log.warning("ignoring unreadable JSearch cache %s: %s", self.cache_path,
+                        type(e).__name__)
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _cache_get(self, text):
+        if self.cache_path is None:
+            return None
+        entry = self._cache_load().get(text)
+        if not isinstance(entry, dict):
+            return None
+        saved, jobs = entry.get("time"), entry.get("jobs")
+        if not isinstance(saved, (int, float)) or not isinstance(jobs, list) or not jobs:
+            return None
+        if time.time() - saved >= CACHE_TTL_SECONDS:
+            return None                   # expired: search again
+        return jobs
+
+    def _cache_put(self, text, jobs):
+        if self.cache_path is None:
+            return
+        now = time.time()
+        cache = {k: v for k, v in self._cache_load().items()     # drop expired entries
+                 if isinstance(v, dict) and isinstance(v.get("time"), (int, float))
+                 and now - v["time"] < CACHE_TTL_SECONDS}
+        cache[text] = {"time": now, "jobs": jobs}
+        try:
+            os.makedirs(os.path.dirname(self.cache_path) or ".", exist_ok=True)
+            tmp = self.cache_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cache, f)
+            os.replace(tmp, self.cache_path)   # no half-written cache file
+        except OSError as e:
+            log.warning("could not write JSearch cache %s: %s", self.cache_path,
+                        type(e).__name__)
 
 
 def parse_job(item):
