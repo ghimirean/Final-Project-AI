@@ -428,12 +428,27 @@ def _load_ner_model():
     # The only function that loads the model. Tests replace it with a fake.
     global _ner_model
     if _ner_model is None:
+        model_path = NER_CONFIG["model_path"]
+        if not os.path.isdir(model_path):
+            raise NERUnavailable(f"model folder not found: {model_path} "
+                                 "(it is committed in git; or rebuild it with python scripts/train_ner.py)")
         try:
             import spacy
-            _ner_model = spacy.load(NER_CONFIG["model_path"])
+        except ImportError:
+            raise NERUnavailable("spaCy is not installed (run: pip install -r requirements.txt)") from None
+        try:
+            _ner_model = spacy.load(model_path)
         except Exception as e:
-            raise NERUnavailable(f"can't load {NER_CONFIG['model_path']}: {type(e).__name__}") from None
+            raise NERUnavailable(f"spaCy could not load {model_path}: {type(e).__name__}: {e}") from None
     return _ner_model
+
+
+def _warn_fallback(reason):
+    print("=" * 70 + "\n"
+          f"WARNING [Agent 1]: the NER model could not be used.\n"
+          f"  Reason: {reason}\n"
+          f"  Falling back to the RULE-BASED parser (profile will say parsed_by=\"rules\").\n"
+          + "=" * 70, file=sys.stderr)
 
 
 def ner_entities(nlp, text):
@@ -563,9 +578,13 @@ def parse_resume_ner(path, skills_path="data/skills.txt"):
     text = read_resume(path)
     try:
         nlp = _load_ner_model()
+    except NERUnavailable as e:                    # model missing or can't load
+        _warn_fallback(e)
+        return parse_resume(path, skills_path)
+    try:
         ents = ner_entities(nlp, text)
-    except Exception as e:                         # model missing or broken
-        print(f"[Agent 1] NER model unavailable ({e}); using rule-based parser.", file=sys.stderr)
+    except Exception as e:                         # model loaded but crashed
+        _warn_fallback(f"the model crashed while reading the resume: {type(e).__name__}: {e}")
         return parse_resume(path, skills_path)
     return build_profile_from_ner(ents, text, load_skills(skills_path))
 

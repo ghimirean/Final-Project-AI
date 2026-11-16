@@ -4,10 +4,12 @@ Most of these tests use a FAKE model that
 returns hand-checked annotations (tests/fixtures/ner/handmade_eval.jsonl),
 i.e. a "perfect" NER model. That tests how Python assembles entities into
 the profile, separately from how good the model is (scripts/train_ner.py
-measures that). One optional test uses the real model if it has been built.
+measures that). The last tests load the real committed model and fail if
+it is missing, broken, or scores F1 < 0.90 on the hand-annotated resumes.
 """
 import json
 import os
+import sys
 
 import pytest
 
@@ -19,6 +21,7 @@ from resume_parser import (
 from pipeline import run_pipeline
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "scripts"))             # for train_ner.evaluate
 FIXTURES = os.path.join(ROOT, "tests", "fixtures")
 SKILLS = os.path.join(ROOT, "data", "skills.txt")
 with open(os.path.join(FIXTURES, "ner", "handmade_eval.jsonl"), encoding="utf-8") as f:
@@ -160,25 +163,40 @@ def test_entity_line_numbers():
 
 # ---------- fallback ----------
 
-def test_falls_back_to_rules_when_model_missing():
-    # conftest.py blocks the real model: that's the "not trained yet" case
+def test_falls_back_to_rules_when_model_missing(capsys):
+    # conftest.py blocks the real model: that's the "model missing" case
     profile = parse_resume_ner(path("resume_title_case.docx"), SKILLS)
     assert profile["parsed_by"] == "rules"
     assert profile == parse_resume(path("resume_title_case.docx"), SKILLS)
+    warning = capsys.readouterr().err                         # the fallback is loud
+    assert "WARNING [Agent 1]" in warning
+    assert "disabled in tests" in warning                     # says why
+    assert "RULE-BASED parser" in warning
 
 
-def test_falls_back_when_model_crashes(fake_ner):
+def test_falls_back_when_model_crashes(fake_ner, capsys):
     def broken(text):
         raise RuntimeError("corrupt model")
     fake_ner(broken)
     assert parse_resume_ner(path("resume_title_case.docx"), SKILLS)["parsed_by"] == "rules"
+    warning = capsys.readouterr().err
+    assert "crashed while reading the resume: RuntimeError: corrupt model" in warning
 
 
 def test_loader_reports_missing_model(monkeypatch):
     monkeypatch.undo()                                        # use the real loader
     monkeypatch.setattr(resume_parser, "_ner_model", None)
     monkeypatch.setitem(NER_CONFIG, "model_path", os.path.join(ROOT, "no_such_model_dir"))
-    with pytest.raises(NERUnavailable):
+    with pytest.raises(NERUnavailable, match="model folder not found"):
+        resume_parser._load_ner_model()
+
+
+def test_loader_reports_broken_model(monkeypatch, tmp_path):
+    # A folder that exists but isn't a spaCy model
+    monkeypatch.undo()
+    monkeypatch.setattr(resume_parser, "_ner_model", None)
+    monkeypatch.setitem(NER_CONFIG, "model_path", str(tmp_path))
+    with pytest.raises(NERUnavailable, match="spaCy could not load"):
         resume_parser._load_ner_model()
 
 
@@ -196,13 +214,26 @@ def test_pipeline_rejects_unknown_parser():
         run_pipeline(path("resume_title_case.docx"), JOBS, parser="magic")
 
 
-# ---------- the real model (only if it has been built locally) ----------
+# ---------- the real, committed model (fails loudly if it breaks) ----------
 
-@pytest.mark.skipif(not os.path.exists(os.path.join(NER_CONFIG["model_path"], "meta.json")),
-                    reason="models/resume_ner not built; run python scripts/train_ner.py")
-def test_real_model_on_fixture(monkeypatch):
+@pytest.fixture
+def real_model(monkeypatch):
     monkeypatch.undo()                                        # allow the real model
+    monkeypatch.setattr(resume_parser, "_ner_model", None)    # load it fresh from disk
+    return resume_parser._load_ner_model()
+
+
+def test_committed_model_f1_on_handmade_set(real_model):
+    # Loads models/resume_ner/ the same way the app does and scores it on the
+    # 3 hand-annotated resumes. Fails if the model is missing, corrupt, or worse.
+    from train_ner import evaluate, load_records
+    scores = evaluate(real_model, load_records("handmade_eval.jsonl"))
+    assert scores["overall"]["f1"] >= 0.90, scores["overall"]
+
+
+def test_real_model_on_fixture(real_model, capsys):
     profile = parse_resume_ner(path("resume_numeric_dates.docx"), SKILLS)
     assert profile["parsed_by"] == "ner"
     assert profile["name"] == "Marcus Oyelaran"
     assert profile["experience_years"] == 3.0
+    assert "WARNING" not in capsys.readouterr().err

@@ -3,8 +3,6 @@ import json
 import os
 import sys
 
-import pytest
-
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 sys.path.insert(0, os.path.join(ROOT, "tests", "fixtures", "ner"))
@@ -92,10 +90,8 @@ def test_training_runs_and_adds_new_labels():
     assert {"DEGREE", "JOB_TITLE", "SKILL"} <= set(nlp.get_pipe("ner").labels)
 
 
-# ---------- the trained model (only if it has been built locally) ----------
+# ---------- the committed model's saved training metrics ----------
 
-@pytest.mark.skipif(not os.path.exists(os.path.join(MODEL_DIR, "metrics.json")),
-                    reason="models/resume_ner not built; run python scripts/train_ner.py")
 def test_saved_model_metrics():
     with open(os.path.join(MODEL_DIR, "metrics.json"), encoding="utf-8") as f:
         metrics = json.load(f)
