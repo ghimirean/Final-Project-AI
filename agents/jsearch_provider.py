@@ -10,8 +10,13 @@ request header and never appears in error messages.
 Results are cached on disk (output/jsearch_cache.json, git-ignored) for 24
 hours, keyed by the final query text, so repeating a search doesn't use up
 the free plan's 200 requests a month. Only successful, non-empty results are
-cached. Delete the file to get fresh results; pass cache_path=None to turn
-the cache off.
+cached: an empty result or an error is never stored, so the next run asks
+JSearch again. Delete the file to get fresh results; pass cache_path=None to
+turn the cache off.
+
+After every search, provider.last_request says what happened, for the run
+trace: {"query_text", "http_status" (None if cached or no reply),
+"raw_count" (jobs in JSearch's reply), "from_cache"}.
 """
 import json
 import logging
@@ -38,7 +43,12 @@ log = logging.getLogger(__name__)
 
 class ProviderError(Exception):
     """Raised for any job-source problem: missing key, network or HTTP
-    error, or a reply that isn't the expected JSON."""
+    error, or a reply that isn't the expected JSON. `status` is the HTTP
+    status code, or None if there was no HTTP reply."""
+
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
 
 
 class JSearchProvider(JobProvider):
@@ -47,6 +57,7 @@ class JSearchProvider(JobProvider):
     def __init__(self, api_key=None, cache_path=DEFAULT_CACHE_PATH):
         self.api_key = api_key or os.environ.get("RAPIDAPI_KEY")
         self.cache_path = cache_path      # None = no caching
+        self.last_request = None          # what the last search did (see top of file)
 
     def build_query_text(self, query):
         """Agent 2 query dict -> one free-text JSearch query, e.g.
@@ -66,8 +77,11 @@ class JSearchProvider(JobProvider):
         if not self.api_key:
             raise ProviderError("RAPIDAPI_KEY is not set (add to .env)")
         text = self.build_query_text(query)
+        self.last_request = {"query_text": text, "http_status": None,
+                             "raw_count": None, "from_cache": False}
         cached = self._cache_get(text)
         if cached is not None:
+            self.last_request.update(raw_count=len(cached), from_cache=True)
             return cached
         jobs = self._fetch(text)
         if jobs:                          # never cache empty results (or errors)
@@ -82,20 +96,24 @@ class JSearchProvider(JobProvider):
                                     timeout=TIMEOUT_SECONDS)
         except requests.RequestException as e:
             raise ProviderError(f"network error: {type(e).__name__}") from None
-        if response.status_code in (401, 403):
+        status = response.status_code
+        self.last_request["http_status"] = status
+        if status in (401, 403):
             raise ProviderError("JSearch rejected the key (check RAPIDAPI_KEY and "
-                                f"that you subscribed to the plan): HTTP {response.status_code}")
-        if response.status_code == 429:
-            raise ProviderError("JSearch rate limit or monthly quota reached (HTTP 429)")
-        if response.status_code != 200:
-            raise ProviderError(f"JSearch returned HTTP {response.status_code}")
+                                f"that you subscribed to the plan): HTTP {status}", status)
+        if status == 429:
+            raise ProviderError("JSearch rate limit or monthly quota reached (HTTP 429)", status)
+        if status != 200:
+            raise ProviderError(f"JSearch returned HTTP {status}", status)
         try:
             data = response.json().get("data") or []
         except (ValueError, AttributeError):
-            raise ProviderError("JSearch did not return valid JSON") from None
-        # /search-v2 returns {"jobs": [...], "cursor": "..."}; a plain list also works
+            raise ProviderError("JSearch did not return valid JSON (HTTP 200)", status) from None
+        # /search-v2 returns {"data": {"jobs": [...], "cursor": ...}}; a plain list also works
         jobs = data.get("jobs") if isinstance(data, dict) else data
-        return [parse_job(item) for item in (jobs or []) if isinstance(item, dict)]
+        jobs = [parse_job(item) for item in (jobs or []) if isinstance(item, dict)]
+        self.last_request["raw_count"] = len(jobs)
+        return jobs
 
     # ---------- on-disk cache ----------
 

@@ -87,12 +87,38 @@ class Trace:
         return path
 
 
+def search_records(trace):
+    """One line per real search Agent 2 made (LLM steps, rule fallback and
+    widenings): what was asked, where, the HTTP status and how many jobs came back."""
+    records = []
+    for step in trace:
+        if "search" not in step:
+            continue
+        record = {"step": step["step"], **step["search"]}
+        if step["step"] == "widen":
+            record["widened_from"] = step.get("widened_from")
+        records.append(record)
+    return records
+
+
+def warn_search_errors(records):
+    """A visible WARNING for every failed search, with its HTTP status."""
+    for r in records:
+        if "error" in r:
+            status = f"HTTP {r['http_status']}" if r.get("http_status") else "no HTTP reply"
+            warn(f"Agent 2 search failed ({status}) for {r.get('query_text')!r}: {r['error']}")
+
+
 def search_jobs_with_fallback(profile, location, provider, offline, limit, max_steps):
     """Agent 2, or the fixture jobs.
-    Returns (jobs, source "jsearch" | "fixture", fallback in words or None, details)."""
+    Returns (jobs, source "jsearch" | "fixture", fallback in words or None, details).
+    details has one record per real search ("searches") and keeps real JSearch
+    jobs ("real_jobs") apart from fixture jobs ("fixture_jobs")."""
     if offline:
-        return load_jobs(FIXTURE_JOBS), "fixture", "offline mode: fixture jobs used on purpose", {}
-    details = {}
+        jobs = load_jobs(FIXTURE_JOBS)
+        return (jobs, "fixture", "offline mode: fixture jobs used on purpose",
+                {"real_jobs": 0, "fixture_jobs": len(jobs), "searches": []})
+    details = {"real_jobs": 0, "searches": []}
     if not getattr(provider, "api_key", True):           # checked first: saves the Groq calls
         reason = "no JSearch key (RAPIDAPI_KEY not set in .env)"
     else:
@@ -100,9 +126,17 @@ def search_jobs_with_fallback(profile, location, provider, offline, limit, max_s
             result = run_job_agent(profile, provider, location=location, limit=limit,
                                    max_steps=max_steps)
         except Exception as e:                           # quota used up, network, ...
-            reason = f"Agent 2 failed: {e}"
+            status = getattr(e, "status", None)
+            reason = f"Agent 2 failed{f' (HTTP {status})' if status else ''}: {e}"
         else:
-            details = {"search_mode": result["mode"], "steps": len(result["trace"])}
+            records = search_records(result["trace"])
+            warn_search_errors(records)
+            details = {"search_mode": result["mode"], "steps": len(result["trace"]),
+                       "real_jobs": len(result["jobs"]), "searches": records}
+            widened = [r["location"] for r in records if r["step"] == "widen"]
+            if widened:
+                details["widened_to"] = widened
+                warn(f"Agent 2 found no jobs in {location!r}, widened to: {', '.join(widened)}")
             llm_errors = [s["error"] for s in result["trace"] if "error" in s]
             if llm_errors:
                 details["llm_error"] = llm_errors[0][:200]
@@ -111,13 +145,19 @@ def search_jobs_with_fallback(profile, location, provider, offline, limit, max_s
                     fallback = ("Agent 2's LLM failed, so its rule-based search query was used"
                                 + (f" ({llm_errors[0][:120]})" if llm_errors else ""))
                     warn(fallback)
+                    details["fixture_jobs"] = 0
                     return result["jobs"], "jsearch", fallback, details
+                details["fixture_jobs"] = 0
                 return result["jobs"], "jsearch", None, details
-            errors = [s["search_error"] for s in result["trace"] if "search_error" in s]
-            reason = (f"Agent 2's searches failed ({', '.join(errors)})" if errors
-                      else "Agent 2 found no jobs")
+            errors = [f"HTTP {r['http_status']}: {r['error']}" if r.get("http_status")
+                      else r["error"] for r in records if "error" in r]
+            reason = (f"Agent 2's searches failed ({'; '.join(errors)})" if errors
+                      else f"Agent 2 found no jobs ({len(records)} searches, "
+                           "none failed, all returned 0 jobs)")
     warn(f"{reason}. Using the fake jobs in tests/fixtures/jobs.json instead.")
-    return load_jobs(FIXTURE_JOBS), "fixture", reason, details
+    jobs = load_jobs(FIXTURE_JOBS)
+    details["fixture_jobs"] = len(jobs)
+    return jobs, "fixture", reason, details
 
 
 def agent3_fallbacks(ranked):
@@ -324,6 +364,16 @@ def print_trace(path):
     print(f"\n{'Stage':<34}{'Kind of AI':<32}{'Time':>7}  Fallback")
     for s in stages:
         print(f"{s['agent']:<34}{s['kind_of_ai']:<32}{s['seconds']:>6.1f}s  {s['fallback'] or '-'}")
+    for s in stages:
+        searches = s["details"].get("searches")
+        if searches:
+            print(f"\nAgent 2 searches (real jobs: {s['details'].get('real_jobs', 0)}, "
+                  f"fixture jobs: {s['details'].get('fixture_jobs', 0)}):")
+            for r in searches:
+                status = "cache" if r.get("from_cache") else (r.get("http_status") or "-")
+                print(f"  {str(r['step']):<9}{str(status):<7}{str(r.get('raw_count')):>4} raw  "
+                      f"{r.get('returned', 0):>3} kept  {r.get('query_text')!r}"
+                      + (f"  ERROR: {r['error']}" if "error" in r else ""))
 
 
 if __name__ == "__main__":

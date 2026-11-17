@@ -326,6 +326,25 @@ JSON) or finishes without searching, Agent 2 runs one search with the
 rule-based `build_query(profile)`. The result's `mode` is `"llm"` or
 `"rules"`, so you can tell which path ran.
 
+**Search records and errors.** Every step that searched has a `"search"`
+record in the trace: `query_text`, `location`, `http_status`, `raw_count`,
+`returned` (after cleaning), `from_cache`, and `error` if it failed. A failed
+search (401/403 key, 429 quota, 500, network) is logged as a WARNING with its
+status code and recorded as `search_error`; it is never reported as "no jobs".
+
+**Widening.** A small city often has no postings for a title + skills query
+(on Nov 16, `Software Engineer Java OOP in Monroe, LA` returned HTTP 200 with
+0 jobs). If every search comes back empty without an error, Agent 2 widens
+the area by itself: city → state → Remote (`Monroe, LA` → `Louisiana` →
+`Remote`; the state is spelled out because "LA" also means Los Angeles),
+searching the job title only, and stops at the first area with jobs. Each
+widening is a `{"step": "widen", "widened_from", "widened_to", ...}` trace
+entry. That is at most 2 extra requests on top of `max_steps`;
+`run_job_agent(..., widen=False)` turns it off. There is no widening after an
+error (a bad key or a used-up quota would only fail again) or when the
+location is already Remote. After an empty search the LLM is also told to try
+the job title alone.
+
 ### Job source: JSearch
 
 `JSearchProvider` sends one request per search to JSearch's `/search-v2`
@@ -350,6 +369,13 @@ results are cached: errors and empty results are always asked for again. A
 corrupt cache file is ignored and rewritten, never fatal. **Delete
 `output/jsearch_cache.json` to get fresh results.** `JSearchProvider(cache_path=None)`
 turns the cache off.
+
+**What each request did.** After every search, `provider.last_request` holds
+`{"query_text", "http_status", "raw_count", "from_cache"}`. `raw_count` is
+the number of jobs in JSearch's reply (`data -> jobs`); an error leaves it
+`None`, so a failure never looks like "0 jobs". `ProviderError.status` is the
+HTTP status code (`None` for network errors). A real JSearch reply looks like
+`{"status": "OK", "request_id", "parameters", "data": {"jobs": [...], "cursor"}}`.
 
 **Result format**
 ```python
@@ -714,13 +740,26 @@ Without a key, Agent 2 isn't called at all, so no Groq calls are wasted.
 Agents 1 and 3 keep their own fallbacks (rule-based parser; TF-IDF and
 rule-based key points).
 
-**Stage trace** — `output/run_trace.json` (git-ignored), one entry per stage:
+**Stage trace** — `output/run_trace.json` (git-ignored), one entry per stage.
+Agent 2's entry lists every real search (LLM steps, rule fallback, widenings)
+and counts real JSearch jobs apart from fixture jobs:
 ```json
 {"agent": "Agent 2: job search", "kind_of_ai": "generative LLM with tool use",
  "model": "Groq openai/gpt-oss-120b + JSearch (RapidAPI)", "seconds": 4.2,
  "fallback_used": false, "fallback": null,
- "details": {"jobs_source": "jsearch", "jobs_found": 18, "search_mode": "llm", "steps": 3}}
+ "details": {"jobs_source": "jsearch", "jobs_found": 10, "search_mode": "llm", "steps": 2,
+             "real_jobs": 10, "fixture_jobs": 0, "widened_to": ["Louisiana"],
+             "searches": [
+   {"step": 1, "query_text": "Software Engineer Java OOP in Monroe, LA", "location": "Monroe, LA",
+    "http_status": 200, "raw_count": 0, "returned": 0, "from_cache": false},
+   {"step": "widen", "query_text": "Software Engineer in Louisiana", "location": "Louisiana",
+    "http_status": 200, "raw_count": 10, "returned": 10, "from_cache": false,
+    "widened_from": "Monroe, LA"}]}}
 ```
+A failed search is printed as `WARNING [Orchestrator]: Agent 2 search failed
+(HTTP 429) ...` and the fallback reason names the status, so "the source
+failed" never reads as "found no jobs". The command line prints the searches
+after the stage table.
 
 **Agent 4 handoff** — `output/interview_brief.json` (git-ignored). This is
 the contract with Agent 4 (`brief_version` changes if the format does):
@@ -779,13 +818,13 @@ see the **Actions** tab on GitHub, or the ✓ / ✗ next to each commit.
 | `tests/test_train_ner.py` | Train/test split, exact-match P/R/F1 on known cases, a 1-epoch training smoke run, the committed model's saved metrics |
 | `tests/test_parser_ner.py` | NER parser with a fake "perfect" model: same profile as rules on the 3 fixtures, skill entity linking (aliases, unknown skills dropped, text matches added), planned-work skills dropped, company recovered from "Company | Title", Python date math, model mistakes filtered (fake dates, project roles, links), loud fallback when the model is missing, broken or crashes, pipeline default; plus the real committed model (F1 ≥ 0.90 on the hand-annotated resumes) |
 | `tests/test_unseen_layouts.py` | The 3 fake resumes in unseen layouts are readable (the PDF really has two columns) and the checker's field comparison works |
-| `tests/test_orchestrator.py` | The full run with fake Agent 2 LLM/provider: stage order and trace fields, fallbacks recorded, no contact details in the trace, fixture-job fallback (no key, failed searches, no jobs, crash) with a warning, no key = no Groq/JSearch calls, `--offline`; the terminal chooser (top 5 menu, number, invalid input asked again, custom role validated, quit / Ctrl-D); custom role through Agent 3; the interview brief (fields, original description, no contact details, free text scrubbed, none when the user quits) |
+| `tests/test_orchestrator.py` | The full run with fake Agent 2 LLM/provider: stage order and trace fields, fallbacks recorded, no contact details in the trace, fixture-job fallback (no key, failed searches, no jobs, crash) with a warning, per-search records and real vs fixture job counts in the trace, widening traced and warned, HTTP status in the error warning, no key = no Groq/JSearch calls, `--offline`; the terminal chooser (top 5 menu, number, invalid input asked again, custom role validated, quit / Ctrl-D); custom role through Agent 3; the interview brief (fields, original description, no contact details, free text scrubbed, none when the user quits) |
 | `tests/test_job_synthesizer.py` | Requirement extraction, scoring, penalties, ranking (on the TF-IDF fallback), the optional LLM key points with a fake Groq: score unchanged, no contact details in the prompt, every fallback case |
 | `tests/test_keypoints.py` | Embedding key points: spaCy candidate phrases, the real KeyBERT on a fake embedding model, resume matching (by skill, by similarity, not at all), nice-to-haves, field building, no Groq calls by default, score unchanged, fallbacks, the KeyBERT-vs-Groq matching in `scripts/compare_key_points.py` |
 | `tests/test_embeddings.py` | Chunking, best-chunk similarity, the 0–40 mapping, scores not depending on other jobs, fallback |
 | `tests/test_pipeline.py` | `run_pipeline` and the `/rank` endpoint (FastAPI `TestClient`) |
-| `tests/test_job_search_agent.py` | Agent 2 loop with a scripted fake LLM: search/finish, merging, repeat queries, step and job limits, rule-based fallback, provider errors, prompt contains no contact details, query cleaning |
-| `tests/test_jsearch_provider.py` | JSearch provider with a fake HTTP call: request building, result parsing, error cases, key never in error messages; query cache in a temp folder: a hit skips the request, expired entries are refreshed, errors and empty results aren't cached, a corrupt file is ignored, `cache_path=None` turns it off |
+| `tests/test_job_search_agent.py` | Agent 2 loop with a scripted fake LLM: search/finish, merging, repeat queries, step and job limits, rule-based fallback, provider errors (status in the trace, logged warning), per-search records, widening city → state → Remote (and when not to widen), prompt contains no contact details, query cleaning |
+| `tests/test_jsearch_provider.py` | JSearch provider with a fake HTTP call: request building, result parsing, error cases with their HTTP status, `last_request` (status, raw count, cache hits), key never in error messages; query cache in a temp folder: a hit skips the request, expired entries are refreshed, errors and empty results aren't cached, a corrupt file is ignored, `cache_path=None` turns it off |
 | `tests/test_search_endpoint.py` | `POST /search`: NER parser used, success, fallback, empty results, bad input (file type, `limit`, `max_steps`), `max_steps` default and pass-through, 502 on job source failure |
 
 **Tests never call a real LLM or job site, or load the real embedding model.**

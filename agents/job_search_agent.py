@@ -9,6 +9,17 @@ No agent frameworks: the loop is plain Python on top of ask_llm().
     result["jobs"]    # [{id, title, company, location, url, description}, ...]
     result["trace"]   # what the agent thought / searched / saw at each step
     result["mode"]    # "llm" or "rules" (rules = fell back to build_query)
+
+Every step that searched has a "search" record: query_text, location,
+http_status, raw_count (jobs in the source's reply), returned (after
+cleaning), from_cache, and error (with the HTTP status) if it failed.
+A failed search is logged as a WARNING, never reported as "no jobs".
+
+If every search came back empty (no error), the agent widens the area by
+itself: city -> state -> Remote (e.g. "Monroe, LA" -> "Louisiana" ->
+"Remote"), searching the job title only, and stops at the first area with
+jobs. Each widening is a "widen" step in the trace. That is at most 2 extra
+requests on top of max_steps; widen=False turns it off.
 """
 import json
 import logging
@@ -29,6 +40,20 @@ LLM_CONFIG = {"provider": "groq", "model": "openai/gpt-oss-120b"}
 MAX_STEPS = 4
 MAX_KEYWORDS = 5
 LEVELS = ("entry", "mid", "senior")
+
+US_STATES = {
+    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California",
+    "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware", "FL": "Florida", "GA": "Georgia",
+    "HI": "Hawaii", "ID": "Idaho", "IL": "Illinois", "IN": "Indiana", "IA": "Iowa",
+    "KS": "Kansas", "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi",
+    "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada", "NH": "New Hampshire",
+    "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York", "NC": "North Carolina",
+    "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma", "OR": "Oregon", "PA": "Pennsylvania",
+    "RI": "Rhode Island", "SC": "South Carolina", "SD": "South Dakota", "TN": "Tennessee",
+    "TX": "Texas", "UT": "Utah", "VT": "Vermont", "VA": "Virginia", "WA": "Washington",
+    "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming", "DC": "District of Columbia",
+}
 
 
 class QueryModel(BaseModel):
@@ -122,18 +147,63 @@ def observe(step, query, jobs, new_count, total, error=None):
            "sample": [f"{j['title'][:60]} - {j['company'][:40]}" for j in jobs[:5]]}
     if error:
         obs["error"] = error
+    elif not jobs:
+        obs["note"] = "no jobs found: try the job title alone, or one keyword"
     return obs
 
 
+def wider_locations(location):
+    """The areas to try, in order, when a search finds nothing:
+    "Monroe, LA" -> ["Louisiana", "Remote"]; "Chicago" -> ["Remote"];
+    "Remote" or no location -> [] (already as wide as it gets).
+    The state is spelled out, because "LA" alone reads as Los Angeles."""
+    location = (location or "").strip()
+    if not location or "remote" in location.lower():
+        return []
+    parts = [p.strip() for p in location.split(",") if p.strip()]
+    wider = []
+    if len(parts) >= 2:
+        last = parts[-1]
+        state = US_STATES.get(last.upper()) or next(
+            (name for name in US_STATES.values() if name.lower() == last.lower()), None)
+        if state:
+            wider.append(state)
+    return wider + ["Remote"]
+
+
+def run_search(query, provider, limit):
+    """One tool call. Returns (jobs, record, error); record is what goes in
+    the trace. Errors are caught here and logged as a WARNING with the
+    message (which has the HTTP status), so they never look like "0 jobs"."""
+    error, jobs = None, []
+    try:
+        jobs = search_jobs(query, provider, limit)
+    except Exception as e:  # a provider problem must not crash the pipeline
+        error = e
+    info = getattr(provider, "last_request", None) or {}
+    record = {"query_text": info.get("query_text"), "location": query.get("location", ""),
+              "http_status": info.get("http_status"), "raw_count": info.get("raw_count"),
+              "returned": len(jobs), "from_cache": bool(info.get("from_cache"))}
+    if error is not None:
+        status = getattr(error, "status", None)
+        record["http_status"] = status if status is not None else record["http_status"]
+        # our ProviderError messages are safe to show (no key); others: class name only
+        record["error"] = (str(error) if type(error).__name__ == "ProviderError"
+                           else type(error).__name__)
+        log.warning("Agent 2 search failed (%s): %s", query.get("location") or "any location",
+                    record["error"])
+    return jobs, record, error
+
+
 def run_job_agent(profile, provider, location="", limit=20, config=None,
-                  max_steps=MAX_STEPS):
+                  max_steps=MAX_STEPS, widen=True):
     """Runs the agent loop and returns {"jobs", "trace", "mode"}."""
     config = config or LLM_CONFIG
     level = experience_level(profile.get("experience_years"))
     summary = profile_summary(profile)
     found = {}                     # job id -> job (keeps the order found)
     history, trace, tried = [], [], set()
-    searches = 0
+    searches, last_query = 0, None
 
     for step in range(1, max_steps + 1):
         prompt = build_prompt(summary, location, history, limit, max_steps)
@@ -159,12 +229,11 @@ def run_job_agent(profile, provider, location="", limit=20, config=None,
             continue
         tried.add(key)
 
-        error = None
-        try:
-            jobs = search_jobs(query, provider, limit)
-        except Exception as e:  # a provider problem must not crash the pipeline
-            jobs, error = [], type(e).__name__
+        jobs, record, error = run_search(query, provider, limit)
+        entry["search"] = record
+        error = record.get("error")
         searches += 1
+        last_query = query
 
         new_jobs = [j for j in jobs if j["id"] not in found]
         for job in new_jobs:
@@ -184,8 +253,33 @@ def run_job_agent(profile, provider, location="", limit=20, config=None,
         mode = "rules"
         log.warning("Agent 2 using rule-based query fallback")
         query = build_query(profile, location)
-        for job in search_jobs(query, provider, limit):
+        jobs, record, error = run_search(query, provider, limit)
+        trace.append({"step": "fallback", "query": query, "returned": len(jobs),
+                      "search": record})
+        if error is not None:
+            raise error                    # the caller reports the job source failure
+        for job in jobs:
             found[job["id"]] = job
-        trace.append({"step": "fallback", "query": query, "returned": len(found)})
+        last_query = query
+
+    # Nothing found and nothing failed: the area is too small, so widen it
+    # (not after an error: a bad key or used-up quota would fail again)
+    any_failed = any("error" in s.get("search", {}) for s in trace)
+    if widen and not found and last_query is not None and not any_failed:
+        area = location
+        for wider in wider_locations(location):
+            # a wider area, and the job title only (keep one skill if there is no title)
+            query = dict(last_query, location=wider,
+                         keywords=[] if last_query["title"] else last_query["keywords"][:1])
+            log.warning("Agent 2 found no jobs in %s; widening the search to %s",
+                        area or "any location", wider)
+            jobs, record, error = run_search(query, provider, limit)
+            trace.append({"step": "widen", "widened_from": area, "widened_to": wider,
+                          "query": query, "returned": len(jobs), "search": record})
+            for job in jobs[:limit]:
+                found[job["id"]] = job
+            if found or error is not None:  # stop at jobs, or when the source fails
+                break
+            area = wider
 
     return {"jobs": list(found.values())[:limit], "trace": trace, "mode": mode}
