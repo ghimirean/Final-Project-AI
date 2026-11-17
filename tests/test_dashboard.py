@@ -136,6 +136,17 @@ def test_bullets():
     assert bullets([]) == "_none_"
 
 
+def test_count_uses_the_singular_for_one():
+    assert dashboard.count(1, "job") == "1 job"
+    assert dashboard.count(0, "job") == "0 jobs"
+    assert dashboard.count(6, "ranked job") == "6 ranked jobs"
+
+
+def test_demo_notice_for_one_job_is_singular():
+    notices = stage_notices(fake_state(DEMO_REPLAY, "demo replay: ...", real_jobs=1), "demo")
+    assert "replaying 1 real job " in notices[0][1]
+
+
 def test_breakdown_rows():
     rows = breakdown_rows({"skill_points": 30.0, "text_points": 20.0, "text_method": "embeddings",
                            "text_similarity": 0.4, "experience_penalty": 10, "required_years": 3,

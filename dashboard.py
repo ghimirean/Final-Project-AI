@@ -143,7 +143,7 @@ def stage_notices(state, mode):
     reason = str(agent2.get("fallback") or "")
     details = agent2.get("details") or {}
     if source == DEMO_REPLAY:
-        notices.append(("info", f"Demo mode: replaying {details.get('real_jobs', 0)} real jobs "
+        notices.append(("info", f"Demo mode: replaying {count(details.get('real_jobs', 0), 'real job')} "
                                 f"saved {details.get('saved') or 'earlier'} (no API calls)."))
     elif source == "fixture" and mode == "offline":
         notices.append(("info", "Offline mode: these are fake practice jobs (no API calls)."))
@@ -247,6 +247,11 @@ def choice_label(ranked, picked):
             f"({float(job.get('score') or 0):.1f})")
 
 
+def count(n, noun, plural=None):
+    """"1 job", "0 jobs", "3 real jobs"."""
+    return f"{n} {noun if n == 1 else (plural or noun + 's')}"
+
+
 def relative(path):
     return os.path.relpath(path, ROOT) if path and path.startswith(ROOT) else path
 
@@ -302,7 +307,7 @@ def job_card(rank, job):
 
 
 def job_cards(ranked):
-    st.subheader(f"{len(ranked)} ranked jobs, best match first")
+    st.subheader(f"{count(len(ranked), 'ranked job')}, best match first")
     for i, job in enumerate(ranked, 1):
         job_card(i, job)
 
@@ -441,7 +446,7 @@ def find_jobs(upload, location, mode, max_steps):
             status.update(label="Finding jobs failed", state="error", expanded=False)
             st.session_state["error"] = failure_message(current["stage"], e)
             return
-        status.update(label=f"Found {len(state['ranked_jobs'])} jobs", state="complete",
+        status.update(label=f"Found {count(len(state['ranked_jobs']), 'job')}", state="complete",
                       expanded=False)
     st.session_state["run"] = state
     st.session_state["mode"] = mode
