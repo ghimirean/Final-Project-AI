@@ -83,6 +83,42 @@ def test_duplicate_urls_are_removed():
     assert len(jobs) == len(RAW_JOBS)
 
 
+# A FAKE posting syndicated to two job boards (shaped like the real
+# Marsh & McLennan case: same text, different city, url and id)
+LISTED_TWICE = [
+    {"id": "a1", "title": "React Full Stack - Senior Software Engineer",
+     "company": "Fakeco & Partners Companies", "location": "Mandeville, LA",
+     "url": "https://board-one.test/job/1", "description": "Build React apps.  Remote role."},
+    {"id": "b2", "title": "React Full Stack – Senior Software Engineer",
+     "company": "Fakeco & Partners", "location": "Lake Charles, LA",
+     "url": "https://board-two.test/job/9", "description": "Build React apps. Remote role."},
+]
+
+
+def test_same_posting_on_two_boards_counts_once():
+    jobs = search_jobs({}, FixtureProvider(LISTED_TWICE))
+    assert [j["id"] for j in jobs] == ["fixture-a1"]
+
+
+def test_same_title_company_and_location_counts_once():
+    other_text = dict(LISTED_TWICE[1], location="Mandeville, LA", description="Different words.")
+    jobs = search_jobs({}, FixtureProvider([LISTED_TWICE[0], other_text]))
+    assert len(jobs) == 1
+
+
+def test_same_title_and_company_elsewhere_with_other_text_is_kept():
+    # two real openings: different city AND different description
+    other = dict(LISTED_TWICE[1], description="Lead a team in our Lake Charles office.")
+    assert len(search_jobs({}, FixtureProvider([LISTED_TWICE[0], other]))) == 2
+
+
+def test_different_company_or_title_is_kept():
+    other_company = dict(LISTED_TWICE[1], company="Othercorp")
+    other_title = dict(LISTED_TWICE[1], title="Junior Software Engineer")
+    assert len(search_jobs({}, FixtureProvider([LISTED_TWICE[0], other_company]))) == 2
+    assert len(search_jobs({}, FixtureProvider([LISTED_TWICE[0], other_title]))) == 2
+
+
 def test_limit_is_respected():
     assert len(search_jobs({}, FixtureProvider(RAW_JOBS), limit=3)) == 3
 

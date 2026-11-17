@@ -27,7 +27,7 @@ from typing import List, Literal, Optional
 
 from pydantic import BaseModel
 
-from job_search import build_query, experience_level, search_jobs
+from job_search import JobDeduper, build_query, experience_level, search_jobs
 from llm import LLMError, ask_llm
 
 log = logging.getLogger(__name__)
@@ -202,6 +202,7 @@ def run_job_agent(profile, provider, location="", limit=20, config=None,
     level = experience_level(profile.get("experience_years"))
     summary = profile_summary(profile)
     found = {}                     # job id -> job (keeps the order found)
+    seen = JobDeduper()            # the same posting found by two searches counts once
     history, trace, tried = [], [], set()
     searches, last_query = 0, None
 
@@ -235,7 +236,7 @@ def run_job_agent(profile, provider, location="", limit=20, config=None,
         searches += 1
         last_query = query
 
-        new_jobs = [j for j in jobs if j["id"] not in found]
+        new_jobs = [j for j in jobs if j["id"] not in found and seen.add(j)]
         for job in new_jobs:
             if len(found) < limit:
                 found[job["id"]] = job
@@ -259,7 +260,8 @@ def run_job_agent(profile, provider, location="", limit=20, config=None,
         if error is not None:
             raise error                    # the caller reports the job source failure
         for job in jobs:
-            found[job["id"]] = job
+            if seen.add(job):
+                found[job["id"]] = job
         last_query = query
 
     # Nothing found and nothing failed: the area is too small, so widen it
@@ -277,7 +279,8 @@ def run_job_agent(profile, provider, location="", limit=20, config=None,
             trace.append({"step": "widen", "widened_from": area, "widened_to": wider,
                           "query": query, "returned": len(jobs), "search": record})
             for job in jobs[:limit]:
-                found[job["id"]] = job
+                if seen.add(job):
+                    found[job["id"]] = job
             if found or error is not None:  # stop at jobs, or when the source fails
                 break
             area = wider

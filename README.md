@@ -320,6 +320,16 @@ our own loop (no agent frameworks):
    most one search, so `max_steps` also caps the JSearch requests per run.
    Jobs from all searches are merged without duplicates.
 
+**Duplicates.** Two postings count as the same job (`duplicate_keys` in
+`agents/job_search.py`) if they have the same url, or the same title and
+company (lowercased, punctuation and "Inc"/"LLC"/"Companies" ignored) **and**
+either the same location or the same description text. The description rule
+catches one posting listed on two job boards under different cities (a real
+JSearch case: the same remote Marsh & McLennan role in Mandeville, LA and Lake
+Charles, LA, word for word). Two openings with the same title at the same
+company are kept apart if both the location and the text differ. This is
+checked inside one search and across all of Agent 2's searches.
+
 **The LLM never sees contact details or resume text**: only skills, job
 titles, years of experience and project names and skills.
 
@@ -842,7 +852,7 @@ see the **Actions** tab on GitHub, or the ✓ / ✗ next to each commit.
 | `tests/test_keypoints.py` | Embedding key points: spaCy candidate phrases, the real KeyBERT on a fake embedding model, resume matching (by skill, by similarity, not at all), nice-to-haves (cue sentences, "Preferred" sections split at line breaks and bullets, required wins), field building, no Groq calls by default, score unchanged, fallbacks, the KeyBERT-vs-Groq matching in `scripts/compare_key_points.py` |
 | `tests/test_embeddings.py` | Chunking, best-chunk similarity, the 0–40 mapping, scores not depending on other jobs, fallback |
 | `tests/test_pipeline.py` | `run_pipeline` and the `/rank` endpoint (FastAPI `TestClient`) |
-| `tests/test_job_search_agent.py` | Agent 2 loop with a scripted fake LLM: search/finish, merging, repeat queries, step and job limits, rule-based fallback, provider errors (status in the trace, logged warning), per-search records, widening city → state → Remote (and when not to widen), prompt contains no contact details, query cleaning |
+| `tests/test_job_search_agent.py` | Agent 2 loop with a scripted fake LLM: search/finish, merging (the same posting from two searches counts once), repeat queries, step and job limits, rule-based fallback, provider errors (status in the trace, logged warning), per-search records, widening city → state → Remote (and when not to widen), prompt contains no contact details, query cleaning |
 | `tests/test_jsearch_provider.py` | JSearch provider with a fake HTTP call: request building, result parsing, error cases with their HTTP status, `last_request` (status, raw count, cache hits), key never in error messages; query cache in a temp folder: a hit skips the request, expired entries are refreshed, errors and empty results aren't cached, a corrupt file is ignored, `cache_path=None` turns it off |
 | `tests/test_search_endpoint.py` | `POST /search`: NER parser used, success, fallback, empty results, bad input (file type, `limit`, `max_steps`), `max_steps` default and pass-through, 502 on job source failure |
 
