@@ -69,6 +69,18 @@ def file_extension(filename):
     return ext
 
 
+RUN_KEYS = ("run", "picked", "role")   # session keys that belong to one run
+
+
+def clear_run_state(session):
+    """Forgets everything about a finished run that could hold resume data:
+    the run state (it holds the resume text), the choice widgets, and the
+    uploaded file itself (a new uploader key drops Streamlit's copy)."""
+    for key in RUN_KEYS:
+        session.pop(key, None)
+    session["upload_key"] = session.get("upload_key", 0) + 1
+
+
 def run_agents(filename, data, location, mode, max_steps=LIVE_DEFAULT_STEPS,
                prepare=prepare_run, on_stage=None):
     """Writes the uploaded resume to a temp file, runs Agents 1-3 on it and
@@ -333,9 +345,10 @@ def finish(state, choice):
         with st.spinner(message):
             result = finish_run(state, choice)
     except Exception as e:
-        st.session_state.pop("run", None)      # a half-finished run can't be reused
-        st.error(f"Could not finish the run, please start over. ({type(e).__name__}: {e})")
-        return
+        clear_run_state(st.session_state)      # a half-finished run can't be reused
+        st.session_state["error"] = (f"Could not finish the run, please start over. "
+                                     f"({type(e).__name__}: {e})")
+        st.rerun()
     selected = result["selected"]
     st.session_state["result"] = {
         "title": selected["title"] if selected else None,
@@ -344,7 +357,7 @@ def finish(state, choice):
         "brief": relative(result["handoff"]["brief"]) if result["handoff"] else None,
         "trace": relative(result["trace_path"]),
     }
-    st.session_state.pop("run", None)          # a run can be finished only once
+    clear_run_state(st.session_state)          # drop the resume text and the upload
     st.rerun()
 
 
@@ -366,7 +379,11 @@ def sidebar():
     """The inputs. Returns (uploaded file, location, mode, max_steps, pressed)."""
     with st.sidebar:
         st.header("1. Your resume")
-        upload = st.file_uploader("Resume (PDF or DOCX)", type=list(ALLOWED_TYPES))
+        upload = st.file_uploader("Resume (PDF or DOCX)", type=list(ALLOWED_TYPES),
+                                  key=f"resume_{st.session_state.get('upload_key', 0)}")
+        st.caption("Your resume is only kept in memory: the temporary copy is deleted "
+                   "as soon as it has been read, and everything is cleared once you "
+                   "confirm or quit.")
         location = st.text_input("Location (optional)", placeholder="e.g. Monroe, LA or Remote")
         mode = st.radio("Mode", list(MODES), format_func=MODES.get, index=0)
         max_steps = LIVE_DEFAULT_STEPS
