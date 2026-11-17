@@ -837,6 +837,12 @@ for real JSearch jobs and fixture jobs alike, even if the user quits at the
 job choice. Resume quotes in the assessment are scrubbed like the brief (no
 name, email, phone or links). Agent 3's trace entry names the file.
 
+**No stale brief.** Every run deletes the previous run's
+`output/interview_brief.json` as it starts (`prepare_run`), so the file
+exists only if **this** run chose a job. After a Quit, or a dashboard run
+that is never finished, there is no brief: Agent 4 must not start without
+one (and can check its `created` time against `run_trace.json`'s `started`).
+
 **Agent 4 handoff** — `output/interview_brief.json` (git-ignored). This is
 the contract with Agent 4 (`brief_version` changes if the format does):
 ```json

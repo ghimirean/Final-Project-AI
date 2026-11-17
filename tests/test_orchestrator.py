@@ -517,3 +517,21 @@ def test_demo_without_saved_jobs_uses_fixture_jobs_with_a_warning(tmp_path, agen
 def test_demo_and_offline_together_are_refused(tmp_path):
     with pytest.raises(ValueError, match="not both"):
         run(tmp_path, offline=True, demo=True)
+
+
+# ---------- no stale brief after a Quit (terminal flow) ----------
+
+def test_terminal_choose_then_quit_leaves_no_brief(tmp_path):
+    from orchestrator import make_terminal_chooser
+    brief = tmp_path / "interview_brief.json"
+
+    def chooser(answers):
+        answers = iter(answers)
+        return make_terminal_chooser(ask=lambda prompt: next(answers), show=lambda text: None)
+
+    first = run(tmp_path, offline=True, choose_job=chooser(["1"]))     # pick job 1
+    assert first["handoff"] and brief.exists()
+    second = run(tmp_path, offline=True, choose_job=chooser(["q"]))    # quit
+    assert second["selected"] is None and second["handoff"] is None
+    assert not brief.exists()
+    assert [s["agent"].split(":")[0] for s in trace_of(second)][-1] == "Human in the loop"
