@@ -88,9 +88,11 @@ class Trace:
 
 
 def search_jobs_with_fallback(profile, location, provider, offline, limit, max_steps):
-    """Agent 2, or the fixture jobs. Returns (jobs, fallback reason or None, details)."""
+    """Agent 2, or the fixture jobs.
+    Returns (jobs, source "jsearch" | "fixture", fallback in words or None, details)."""
     if offline:
-        return load_jobs(FIXTURE_JOBS), "offline mode: fixture jobs used on purpose", {}
+        return load_jobs(FIXTURE_JOBS), "fixture", "offline mode: fixture jobs used on purpose", {}
+    details = {}
     if not getattr(provider, "api_key", True):           # checked first: saves the Groq calls
         reason = "no JSearch key (RAPIDAPI_KEY not set in .env)"
     else:
@@ -101,13 +103,21 @@ def search_jobs_with_fallback(profile, location, provider, offline, limit, max_s
             reason = f"Agent 2 failed: {e}"
         else:
             details = {"search_mode": result["mode"], "steps": len(result["trace"])}
+            llm_errors = [s["error"] for s in result["trace"] if "error" in s]
+            if llm_errors:
+                details["llm_error"] = llm_errors[0][:200]
             if result["jobs"]:
-                return result["jobs"], None, details
+                if result["mode"] == "rules":            # real jobs, but the LLM didn't run
+                    fallback = ("Agent 2's LLM failed, so its rule-based search query was used"
+                                + (f" ({llm_errors[0][:120]})" if llm_errors else ""))
+                    warn(fallback)
+                    return result["jobs"], "jsearch", fallback, details
+                return result["jobs"], "jsearch", None, details
             errors = [s["search_error"] for s in result["trace"] if "search_error" in s]
             reason = (f"Agent 2's searches failed ({', '.join(errors)})" if errors
                       else "Agent 2 found no jobs")
     warn(f"{reason}. Using the fake jobs in tests/fixtures/jobs.json instead.")
-    return load_jobs(FIXTURE_JOBS), reason, {}
+    return load_jobs(FIXTURE_JOBS), "fixture", reason, details
 
 
 def agent3_fallbacks(ranked):
@@ -203,10 +213,10 @@ def run_intervai(resume_path, location="", choose_job=None, offline=False, provi
     # Agent 2: LLM job search with the JSearch tool (or the fixture jobs)
     t = time.time()
     provider = provider or JSearchProvider()
-    jobs, reason, details = search_jobs_with_fallback(profile, location, provider, offline,
+    jobs, source, fallback, details = search_jobs_with_fallback(profile, location, provider, offline,
                                                       limit, max_steps)
-    trace.stage("agent2", time.time() - t, fallback=reason,
-                jobs_source="fixture" if reason else "jsearch", jobs_found=len(jobs),
+    trace.stage("agent2", time.time() - t, fallback=fallback,
+                jobs_source=source, jobs_found=len(jobs),
                 location=location or None, **details)
 
     # Agent 3: embeddings ranking + key points
@@ -232,14 +242,14 @@ def run_intervai(resume_path, location="", choose_job=None, offline=False, provi
         descriptions = {job["id"]: job["description"] for job in jobs}
         description = descriptions.get(selected["id"], f"{selected['title']}.")
         handoff = handoff_to_agent4(selected, description, profile,
-                                    "fixture" if reason else "jsearch", out_dir)
+                                    source, out_dir)
         trace.stage("agent4", time.time() - t, job_id=handoff["job_id"], title=handoff["title"],
                     brief=os.path.relpath(handoff["brief"], ROOT) if handoff["brief"].startswith(ROOT)
                     else handoff["brief"])
 
     trace_path = trace.save(out_dir)
     public_profile = {k: v for k, v in profile.items() if k != "raw_text"}
-    return {"profile": public_profile, "jobs_source": "fixture" if reason else "jsearch",
+    return {"profile": public_profile, "jobs_source": source,
             "ranked_jobs": ranked, "selected": selected, "handoff": handoff,
             "trace_path": trace_path}
 

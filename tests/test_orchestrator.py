@@ -306,3 +306,20 @@ def test_custom_role_brief(tmp_path):
     result = run(tmp_path, offline=True, choose_job=lambda ranked: {"custom_role": "Data Engineer"})
     job = brief_of(result)["job"]
     assert job["title"] == "Data Engineer" and job["description"] == "Data Engineer."
+
+
+def test_agent2_llm_failure_is_a_recorded_fallback(tmp_path, monkeypatch, capsys):
+    # Groq rejects the model: Agent 2 still searches with its rule-based query.
+    # The jobs are real (not the fixture), but the trace must say the LLM didn't run.
+    from llm import LLMError
+
+    def model_gone(prompt, provider, model, schema=None):
+        raise LLMError("API returned HTTP 404: model_not_found")
+    monkeypatch.setattr(job_search_agent, "ask_llm", model_gone)
+    result = run(tmp_path, provider=FakeProvider([raw_job(1)]))
+    assert result["jobs_source"] == "jsearch"
+    agent2 = trace_of(result)[1]
+    assert agent2["fallback_used"] and "rule-based search query" in agent2["fallback"]
+    assert agent2["details"]["search_mode"] == "rules"
+    assert "model_not_found" in agent2["details"]["llm_error"]
+    assert "WARNING [Orchestrator]: Agent 2's LLM failed" in capsys.readouterr().err
