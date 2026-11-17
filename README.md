@@ -2,7 +2,7 @@
 
 A multi-agent AI mock interview platform. This README covers **Agent 1
 (Resume Parser)**, **Agent 2 (Job Search)**, **Agent 3 (Job Description Synthesizer + Match Scoring)**
-and the **pipeline / API** that connects them to the HITL dashboard and Agent 4.
+the **pipeline / API**, and the **orchestrator** that runs them all and hands the chosen job to Agent 4.
 
 | Agent | Kind of AI | Model | What the model does | Fallback |
 |---|---|---|---|---|
@@ -17,8 +17,10 @@ can write key points with Groq (`rank_jobs(..., use_llm=True)`). By default
 Agents 1 and 3 run entirely on this computer, with no API keys.
 
 **No agent frameworks.** LangChain, LangGraph, CrewAI and similar aren't
-used. All orchestration is our own Python code: `agents/pipeline.py` calls
-Agent 1, then Agent 3, `POST /search` calls Agent 1, then Agent 2, and every
+used. All orchestration is our own Python code: `agents/orchestrator.py`
+runs Agent 1 → Agent 2 → Agent 3 → the user's job choice → the Agent 4
+handoff, `agents/pipeline.py` calls Agent 1, then Agent 3, `POST /search`
+calls Agent 1, then Agent 2, and every
 LLM call goes through our own small helper (`agents/llm.py`) using plain
 HTTP requests.
 
@@ -672,6 +674,92 @@ that's deleted as soon as the request finishes.
 
 ---
 
+## Orchestrator — the full INTERVAI run (`agents/orchestrator.py`)
+
+Runs every agent in order, in our own code (no agent frameworks):
+
+```
+Agent 1 (NER) -> Agent 2 (LLM + JSearch) -> Agent 3 (embeddings) -> HITL: user picks a job -> Agent 4 handoff
+   profile          job postings              ranked jobs              chosen job           interview_brief.json
+```
+
+**Run it**
+```bash
+python agents/orchestrator.py data/sample.pdf --location "Monroe, LA"   # real job search
+python agents/orchestrator.py data/sample.pdf --offline                 # fake jobs, no JSearch/Groq calls
+python agents/orchestrator.py data/sample.pdf --max-steps 1             # at most 1 JSearch request
+python agents/orchestrator.py data/sample.pdf --offline --auto          # pick the top job, no questions
+```
+Use `--offline` during rehearsals: it uses the 6 fake jobs in
+`tests/fixtures/jobs.json` on purpose and saves the JSearch quota (about 200
+requests a month). Agent 2's own on-disk cache also avoids repeat requests.
+
+**From Python (e.g. a dashboard):**
+```python
+from orchestrator import run_intervai, make_terminal_chooser
+result = run_intervai("resume.pdf", "Remote", choose_job=my_callback, offline=False)
+result["ranked_jobs"], result["selected"], result["handoff"]["brief"], result["trace_path"]
+```
+`choose_job(ranked_jobs)` gets Agent 3's ranking (best first) and returns one
+of the ranked jobs, `{"custom_role": "Data Engineer"}` (a role that isn't in
+the list; Agent 3 scores it from the role name alone), or `None` to stop
+before Agent 4. `make_terminal_chooser()` is the terminal version: it shows
+the top 5 (score, title, company, gaps) and accepts a number, `c` for a
+custom role, or `q` / Ctrl-D to quit. Invalid input is explained and asked again.
+
+**Fallbacks** (each one is printed as a `WARNING [Orchestrator]` and recorded):
+if Agent 2 can't search (no `RAPIDAPI_KEY`, quota used up, a network or API
+error, or no jobs found), the fake jobs in `tests/fixtures/jobs.json` are used.
+Without a key, Agent 2 isn't called at all, so no Groq calls are wasted.
+Agents 1 and 3 keep their own fallbacks (rule-based parser; TF-IDF and
+rule-based key points).
+
+**Stage trace** — `output/run_trace.json` (git-ignored), one entry per stage:
+```json
+{"agent": "Agent 2: job search", "kind_of_ai": "generative LLM with tool use",
+ "model": "Groq llama-3.3-70b-versatile + JSearch (RapidAPI)", "seconds": 4.2,
+ "fallback_used": false, "fallback": null,
+ "details": {"jobs_source": "jsearch", "jobs_found": 18, "search_mode": "llm", "steps": 3}}
+```
+
+**Agent 4 handoff** — `output/interview_brief.json` (git-ignored). This is
+the contract with Agent 4 (`brief_version` changes if the format does):
+```json
+{
+  "brief_version": 1,
+  "created": "2026-11-16T18:30:00",
+  "jobs_source": "jsearch",
+  "job": {
+    "id": "jsearch-abc123", "title": "Junior Java Developer", "company": "Maplewood Software",
+    "location": "Monroe, LA", "score": 100.0,
+    "description": "Full job posting text ...",
+    "key_points": ["junior developer", "Java", "internal tools", "..."],
+    "required_skills": ["Java", "Git", "OOP", "..."],
+    "nice_to_have": ["C++"],
+    "gaps": ["Linux"],
+    "interview_focus": ["Linux (asked for, not on the resume)",
+                        "Java (ask for an example; resume: skills: Java)", "..."]
+  },
+  "candidate": {
+    "skills": ["Java", "C++", "Git", "..."],
+    "projects": [{"name": "Car Rental System", "role": "Lead Developer", "date": "Jun 2024",
+                  "summary": "...", "skills": ["Java", "Git", "OOP"]}],
+    "experience_years": 2.6,
+    "education": {"institution": "...", "degree": "Bachelor of Science in Computer Science",
+                  "field": "Computer Science", "graduation": "May 2028"}
+  }
+}
+```
+- `job.interview_focus` is the list of topics for Agent 4 to ask about:
+  gaps to probe first, then claims to check, each with its resume evidence.
+- **No contact details:** the candidate part has no name, email, phone or
+  links. Free text (the job description, project summaries, key points,
+  gaps, interview topics) is also scrubbed of emails, phone numbers, links
+  and the candidate's name ("the candidate").
+- If the user quits, no brief is written.
+
+---
+
 ## Tests
 
 ```bash
@@ -691,6 +779,7 @@ see the **Actions** tab on GitHub, or the ✓ / ✗ next to each commit.
 | `tests/test_train_ner.py` | Train/test split, exact-match P/R/F1 on known cases, a 1-epoch training smoke run, the committed model's saved metrics |
 | `tests/test_parser_ner.py` | NER parser with a fake "perfect" model: same profile as rules on the 3 fixtures, skill entity linking (aliases, unknown skills dropped, text matches added), planned-work skills dropped, company recovered from "Company | Title", Python date math, model mistakes filtered (fake dates, project roles, links), loud fallback when the model is missing, broken or crashes, pipeline default; plus the real committed model (F1 ≥ 0.90 on the hand-annotated resumes) |
 | `tests/test_unseen_layouts.py` | The 3 fake resumes in unseen layouts are readable (the PDF really has two columns) and the checker's field comparison works |
+| `tests/test_orchestrator.py` | The full run with fake Agent 2 LLM/provider: stage order and trace fields, fallbacks recorded, no contact details in the trace, fixture-job fallback (no key, failed searches, no jobs, crash) with a warning, no key = no Groq/JSearch calls, `--offline`; the terminal chooser (top 5 menu, number, invalid input asked again, custom role validated, quit / Ctrl-D); custom role through Agent 3; the interview brief (fields, original description, no contact details, free text scrubbed, none when the user quits) |
 | `tests/test_job_synthesizer.py` | Requirement extraction, scoring, penalties, ranking (on the TF-IDF fallback), the optional LLM key points with a fake Groq: score unchanged, no contact details in the prompt, every fallback case |
 | `tests/test_keypoints.py` | Embedding key points: spaCy candidate phrases, the real KeyBERT on a fake embedding model, resume matching (by skill, by similarity, not at all), nice-to-haves, field building, no Groq calls by default, score unchanged, fallbacks, the KeyBERT-vs-Groq matching in `scripts/compare_key_points.py` |
 | `tests/test_embeddings.py` | Chunking, best-chunk similarity, the 0–40 mapping, scores not depending on other jobs, fallback |
