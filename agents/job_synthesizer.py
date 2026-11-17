@@ -127,7 +127,8 @@ def extract_requirements(job, skill_list=None):
 # WEIGHTS (total = 100 points)
 # - Skills (60 pts): the most direct signal. Recruiters screen by "do you
 #   have the listed skills", so the share of required skills you have
-#   counts the most.
+#   counts the most. The share is weighted: a required skill counts 1.0 and
+#   a preferred (nice-to-have) skill 0.5 (see SKILL_WEIGHTS below).
 # - Text similarity (40 pts): catches overlap the skill list misses
 #   (job titles, field of study, words like "backend" or "data"). It is
 #   noisier than an exact skill match, so it gets less weight. It comes
@@ -143,6 +144,15 @@ TEXT_WEIGHT = 40
 PENALTY_PER_YEAR = 10
 MAX_PENALTY = 30
 DEGREE_PENALTY = 5
+
+# SKILL WEIGHTS in the skill share. A posting's "Preferred" or "a plus" skills
+# are not a must, so missing one should cost less than missing a required
+# skill, but having one still shows a better fit, so it is not ignored.
+# Half weight does both. Example (Goldbelt, Java + JavaScript required, Linux
+# preferred, candidate has Java): (1.0) / (1.0 + 1.0 + 0.5) = 0.4 -> 24 of 60
+# points, instead of 1/3 -> 20 when Linux counted as fully required.
+REQUIRED_SKILL_WEIGHT = 1.0
+PREFERRED_SKILL_WEIGHT = 0.5
 
 # EMBEDDING SIMILARITY -> TEXT POINTS
 # Embedding similarity is an absolute number: it depends only on the resume
@@ -255,8 +265,13 @@ def score_match(profile, job, skill_list=None, text_score=None):
     from_profile = {s.lower() for s in profile.get("skills", [])}
     matched = [s for s in req["skills"] if s.lower() in have]
     missing = [s for s in req["skills"] if s.lower() not in have]
+    preferred = nice_to_have_skills(job["description"], req["skills"])
 
-    skill_ratio = len(matched) / len(req["skills"]) if req["skills"] else 0.0
+    def weight(skill):
+        return PREFERRED_SKILL_WEIGHT if skill in preferred else REQUIRED_SKILL_WEIGHT
+
+    total_weight = sum(weight(s) for s in req["skills"])
+    skill_ratio = sum(weight(s) for s in matched) / total_weight if total_weight else 0.0
     if text_score is None:
         text_score = text_scores(profile, [job])[0]
 
@@ -280,6 +295,8 @@ def score_match(profile, job, skill_list=None, text_score=None):
             # (coursework, projects, ...), not in Agent 1's skill list
             "matched_from_text": [s for s in matched if s.lower() not in from_profile],
             "missing_skills": missing,
+            # these counted half in skill_points (PREFERRED_SKILL_WEIGHT)
+            "preferred_skills": preferred,
             "skill_points": round(skill_points, 1),
             "text_similarity": round(text_score["similarity"], 3),
             "text_points": round(text_points, 1),

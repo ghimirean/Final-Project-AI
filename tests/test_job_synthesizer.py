@@ -121,6 +121,43 @@ def test_matched_and_missing_skills():
     assert set(b["missing_skills"]) == {"GitHub", "Linux"}
 
 
+# ---------- preferred skills count half in the skill share ----------
+
+def preferred_job(description):
+    return {"id": "fake-pref", "title": "Software Developer", "company": "Fakeco",
+            "location": "Remote", "url": "", "description": description}
+
+
+PREF_POSTING = ("Minimum Qualifications:\n- Working experience with Java, JavaScript\n"
+                "Preferred Qualifications:\n- Unix/Linux Operating System\n")
+
+
+def test_preferred_skill_counts_half_in_skill_points():
+    b = score_match(STUDENT, preferred_job(PREF_POSTING))["breakdown"]
+    assert b["matched_skills"] == ["Java"] and b["preferred_skills"] == ["Linux"]
+    assert set(b["missing_skills"]) == {"JavaScript", "Linux"}
+    assert b["skill_points"] == 24.0               # 60 * 1.0 / (1.0 + 1.0 + 0.5)
+
+
+def test_missing_preferred_skill_costs_less_than_missing_required_one():
+    required = score_match(STUDENT, preferred_job("Requirements:\n- Java\n- Linux\n"))["breakdown"]
+    preferred = score_match(STUDENT, preferred_job("Requirements:\n- Java\nPreferred:\n- Linux\n"))["breakdown"]
+    assert required["skill_points"] == 30.0        # 1 / 2
+    assert preferred["skill_points"] == 40.0       # 1 / 1.5
+
+
+def test_having_a_preferred_skill_still_earns_points():
+    none = score_match(STUDENT, preferred_job("Requirements:\n- Python\nPreferred:\n- Docker\n"))
+    some = score_match(STUDENT, preferred_job("Requirements:\n- Python\nPreferred:\n- Java\n"))
+    assert none["breakdown"]["skill_points"] == 0.0
+    assert some["breakdown"]["skill_points"] == 20.0     # 0.5 / 1.5
+
+
+def test_all_required_skills_score_as_before():
+    b = score_match(STUDENT, preferred_job("Requirements:\n- Java\n- Python\n- SQL\n"))["breakdown"]
+    assert b["preferred_skills"] == [] and b["skill_points"] == 20.0     # plain 1 / 3
+
+
 def test_experience_penalty_for_senior_role():
     b = score_match(STUDENT, JOBS["job-005"])["breakdown"]
     assert b["required_years"] == 5

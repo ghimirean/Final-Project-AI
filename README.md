@@ -254,6 +254,8 @@ skills, education, jobs, years, projects) each pair agrees on. Our run:
 best matches score **90.0 and 75.4** instead of **100.0 and 84.0**, because
 NER doesn't count "Algorithms", which appears only as a course name. The
 order of all six jobs is the same.
+(Measured before preferred skills counted half; with that weighting the
+current scores for sample.pdf are 100.0 and 82.5, same order.)
 
 Earlier, Gemini and the rules agreed on everything except Excel/Word, with
 the same projects on all four resumes (only summaries differ, because Gemini
@@ -616,7 +618,7 @@ Each job gets a score from 0 to 100:
 
 | Part | Points | How |
 |---|---|---|
-| Skill overlap | up to **60** | 60 × (matched skills ÷ skills the job lists) |
+| Skill overlap | up to **60** | 60 × (weight of matched skills ÷ weight of all skills the job lists); a required skill weighs **1.0**, a preferred (nice-to-have) skill **0.5** |
 | Text similarity | up to **40** | embedding cosine similarity, mapped to points (see below) |
 | Experience gap | **−10 per year** short, max −30 | if your total years < the job's minimum |
 | Degree gap | **−5** | if the job asks for a higher degree than you have |
@@ -629,6 +631,16 @@ catches overlap the skill list misses, like job titles, field of study, or
 related wording, but it's noisier, so it counts less. The experience penalty
 pushes senior roles down the list without removing them. The degree penalty
 is small because students often apply while still finishing a degree.
+
+**Why preferred skills count half.** A skill the posting calls "preferred",
+"a plus" or "nice to have" (see `nice_to_have` below) is not a must, so
+missing it should cost less than missing a required skill. Having it still
+shows a better fit, so it isn't ignored either; half weight does both.
+Example (a real Louisiana posting): Java and JavaScript under "Minimum
+Qualifications", Linux under "Preferred", and the candidate has Java:
+1.0 ÷ (1.0 + 1.0 + 0.5) = 0.4 → **24** skill points. Counting Linux as
+required gave 1 ÷ 3 → 20. The breakdown lists the half-weight skills in
+`preferred_skills`; `matched_skills` / `missing_skills` still list every skill.
 
 **Text similarity with embeddings** (`agents/embeddings.py`). An embedding
 model turns a text into a vector that captures its meaning, so related
