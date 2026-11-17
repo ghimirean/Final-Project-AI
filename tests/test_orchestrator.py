@@ -231,3 +231,78 @@ def test_custom_role_goes_through_agent3(tmp_path):
     assert {"score", "assessment", "assessed_by"} <= set(selected)    # same fields as a ranked job
     hitl = [s for s in trace_of(result) if s["agent"].startswith("Human")][0]
     assert hitl["details"]["custom_role"] is True
+
+
+# ---------- Agent 4 handoff: the interview brief ----------
+
+from orchestrator import build_brief, scrub  # noqa: E402
+
+PRIVATE = ("Priya", "Nandakumar", "priya.nandakumar@example.com", "(555) 201-3344",
+           "201-3344", "linkedin", "http")
+
+
+def brief_of(result):
+    with open(result["handoff"]["brief"], encoding="utf-8") as f:
+        return json.load(f)
+
+
+def test_brief_has_the_job_and_the_candidate(tmp_path):
+    result = run(tmp_path, offline=True)
+    brief = brief_of(result)
+    selected = result["selected"]
+    job = brief["job"]
+    assert job["title"] == selected["title"] and job["company"] == selected["company"]
+    jobs = {j["id"]: j for j in json.load(open(os.path.join(ROOT, "tests", "fixtures", "jobs.json")))}
+    assert job["description"] == jobs[selected["id"]]["description"]      # the original posting
+    for field in ("key_points", "required_skills", "gaps", "interview_focus"):
+        assert job[field] == selected["assessment"][field]
+    candidate = brief["candidate"]
+    assert set(candidate) == {"skills", "projects", "experience_years", "education"}
+    assert candidate["skills"] == result["profile"]["skills"]
+    assert [p["name"] for p in candidate["projects"]] == [p["name"] for p in result["profile"]["projects"]]
+    assert brief["jobs_source"] == "fixture"
+    agent4 = trace_of(result)[-1]
+    assert agent4["details"]["brief"].endswith("interview_brief.json")
+
+
+def test_brief_has_no_contact_details(tmp_path):
+    result = run(tmp_path, offline=True)
+    assert result["profile"]["name"] == "Priya Nandakumar" and result["profile"]["linkedin"]
+    text = open(result["handoff"]["brief"], encoding="utf-8").read()
+    for private in PRIVATE:
+        assert private not in text
+
+
+def test_free_text_is_scrubbed():
+    profile = {"name": "Ann Lee", "skills": ["Python"], "experience_years": 1.0,
+               "education": {"degree": "BS", "email": "x"},
+               "projects": [{"name": "Ann Lee's Bot", "role": None, "date": None, "skills": [],
+                             "summary": "Code at github.com/annlee/bot, ask ann@example.com or 555-123-4567"}]}
+    selected = {"id": "j", "title": "Dev", "company": "Acme", "score": 50.0,
+                "assessment": {"key_points": [], "required_skills": [], "nice_to_have": [],
+                               "gaps": [], "interview_focus": [
+                                   "Git (ask for an example; resume: Portfolio: github.com/annlee)"]}}
+    brief = build_brief(selected, "Email jobs@acme.example.com to apply.", profile, "jsearch")
+    text = json.dumps(brief)
+    for private in ("Ann Lee", "github.com", "ann@example.com", "555-123-4567", "jobs@acme"):
+        assert private not in text
+    assert brief["candidate"]["projects"][0]["name"] == "the candidate's Bot"
+    assert brief["candidate"]["education"] == {"institution": None, "degree": "BS",
+                                               "field": None, "graduation": None}
+
+
+def test_scrub_keeps_normal_text():
+    assert scrub("Built a Java app used by 500 students in 2024.") == \
+        "Built a Java app used by 500 students in 2024."
+    assert scrub(None) is None
+
+
+def test_no_brief_when_the_user_quits(tmp_path):
+    run(tmp_path, offline=True, choose_job=lambda ranked: None)
+    assert not os.path.exists(os.path.join(tmp_path, "interview_brief.json"))
+
+
+def test_custom_role_brief(tmp_path):
+    result = run(tmp_path, offline=True, choose_job=lambda ranked: {"custom_role": "Data Engineer"})
+    job = brief_of(result)["job"]
+    assert job["title"] == "Data Engineer" and job["description"] == "Data Engineer."

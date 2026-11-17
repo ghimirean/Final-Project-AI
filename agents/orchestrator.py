@@ -22,7 +22,9 @@ visible WARNING. offline=True (--offline) uses them on purpose, to save the
 JSearch quota during rehearsals.
 
 Every stage is logged (agent, kind of AI, model, seconds, fallback) to
-output/run_trace.json. The trace holds no name, email, phone or links.
+output/run_trace.json. The chosen job and a candidate summary go to Agent 4
+in output/interview_brief.json (format: README, "Orchestrator"). Neither file
+holds the candidate's name, email, phone or links.
 
 Command line (from the project root):
     python agents/orchestrator.py data/sample.pdf --location "Monroe, LA"
@@ -31,6 +33,7 @@ Command line (from the project root):
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -39,7 +42,7 @@ from embeddings import EMBED_CONFIG
 from job_search_agent import LLM_CONFIG as AGENT2_LLM, MAX_STEPS, run_job_agent
 from job_synthesizer import SKILLS_PATH, load_jobs, rank_jobs, save_json
 from jsearch_provider import JSearchProvider
-from resume_parser import NER_CONFIG, parse_resume_ner
+from resume_parser import NER_CONFIG, URL_PATTERN, parse_resume_ner
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_DIR = os.path.join(ROOT, "output")
@@ -117,9 +120,67 @@ def agent3_fallbacks(ranked):
     return "; ".join(used) or None
 
 
-def handoff_to_agent4(selected, profile, out_dir):
-    """Hands the chosen job to Agent 4. (Step 1: records the choice only.)"""
-    return {"job_id": selected["id"], "title": selected["title"]}
+# ---------- Agent 4 handoff: output/interview_brief.json ----------
+
+BRIEF_VERSION = 1
+EMAIL = r"[\w.+-]+@[\w-]+\.[\w.-]+"
+PHONE = r"\+?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}"
+
+
+def scrub(text, name=None):
+    """Removes contact details from free text: emails, phone numbers, links,
+    and the candidate's name (-> "the candidate")."""
+    if not text:
+        return text
+    text = re.sub(EMAIL, "", text)
+    text = re.sub(PHONE, "", text)
+    text = re.sub(URL_PATTERN, "", text, flags=re.IGNORECASE)
+    if name:
+        text = re.sub(re.escape(name), "the candidate", text, flags=re.IGNORECASE)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
+def build_brief(selected, description, profile, jobs_source):
+    """What Agent 4 needs to run the mock interview. The candidate part has
+    skills, projects, experience_years and education ONLY: no name, email,
+    phone or links (free text is scrubbed as well)."""
+    a, name = selected["assessment"], profile.get("name")
+    return {
+        "brief_version": BRIEF_VERSION,
+        "created": datetime.now().isoformat(timespec="seconds"),
+        "jobs_source": jobs_source,
+        "job": {
+            "id": selected["id"],
+            "title": selected["title"],
+            "company": selected.get("company"),
+            "location": selected.get("location"),
+            "score": selected.get("score"),
+            "description": scrub(description, name),
+            # interview_focus quotes resume lines as evidence, so lists are scrubbed too
+            "key_points": [scrub(x, name) for x in a["key_points"]],
+            "required_skills": a["required_skills"],
+            "nice_to_have": a["nice_to_have"],
+            "gaps": [scrub(x, name) for x in a["gaps"]],
+            "interview_focus": [scrub(x, name) for x in a["interview_focus"]],
+        },
+        "candidate": {
+            "skills": list(profile.get("skills", [])),
+            "projects": [{"name": scrub(p.get("name"), name), "role": p.get("role"),
+                          "date": p.get("date"), "summary": scrub(p.get("summary"), name),
+                          "skills": list(p.get("skills", []))}
+                         for p in profile.get("projects", [])],
+            "experience_years": profile.get("experience_years"),
+            "education": {k: (profile.get("education") or {}).get(k)
+                          for k in ("institution", "degree", "field", "graduation")},
+        },
+    }
+
+
+def handoff_to_agent4(selected, description, profile, jobs_source, out_dir):
+    """Writes output/interview_brief.json for Agent 4 and returns where."""
+    path = os.path.join(out_dir, "interview_brief.json")
+    save_json(build_brief(selected, description, profile, jobs_source), path)
+    return {"brief": path, "job_id": selected["id"], "title": selected["title"]}
 
 
 def run_intervai(resume_path, location="", choose_job=None, offline=False, provider=None,
@@ -164,12 +225,17 @@ def run_intervai(resume_path, location="", choose_job=None, offline=False, provi
                 choice=(selected or {}).get("id"), title=(selected or {}).get("title"),
                 custom_role=custom, quit=selected is None)
 
-    # Agent 4 handoff
+    # Agent 4 handoff: the interview brief
     handoff = None
     if selected is not None:
         t = time.time()
-        handoff = handoff_to_agent4(selected, profile, out_dir)
-        trace.stage("agent4", time.time() - t, **handoff)
+        descriptions = {job["id"]: job["description"] for job in jobs}
+        description = descriptions.get(selected["id"], f"{selected['title']}.")
+        handoff = handoff_to_agent4(selected, description, profile,
+                                    "fixture" if reason else "jsearch", out_dir)
+        trace.stage("agent4", time.time() - t, job_id=handoff["job_id"], title=handoff["title"],
+                    brief=os.path.relpath(handoff["brief"], ROOT) if handoff["brief"].startswith(ROOT)
+                    else handoff["brief"])
 
     trace_path = trace.save(out_dir)
     public_profile = {k: v for k, v in profile.items() if k != "raw_text"}
@@ -269,5 +335,8 @@ if __name__ == "__main__":
     if result["selected"]:
         print(f"Chosen: {result['selected']['title']} - {result['selected']['company']} "
               f"(score {result['selected']['score']})")
+        print(f"Interview brief for Agent 4: {os.path.relpath(result['handoff']['brief'], ROOT)}")
+    else:
+        print("No job chosen: stopped before Agent 4.")
     print_trace(result["trace_path"])
     print(f"\nTrace saved to {os.path.relpath(result['trace_path'], ROOT)}")
