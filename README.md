@@ -70,6 +70,12 @@ Every LLM call (Agent 2, and the optional LLM modes of Agents 1 and 3) goes thro
 - **Retries:** "busy" API errors (HTTP 429/5xx) are retried up to 2 times.
   On a rate limit the API says how long to wait (`retry-after` header), and
   the helper waits that long, up to 30 seconds.
+- **Repeatable answers:** every call uses temperature 0, and Groq calls also
+  send a fixed `seed` (`GROQ_SEED` in `agents/llm.py`). With it, Agent 2's
+  first step for sample.pdf picked the same search (`Software Developer` +
+  Java, OOP) 3 times out of 3; without it, two runs picked different titles.
+  Groq calls the seed "best effort", so for a demo that must show the same
+  jobs every time use `--demo` (see Orchestrator).
 
 ---
 
