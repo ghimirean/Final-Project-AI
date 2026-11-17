@@ -334,9 +334,25 @@ def run_intervai(resume_path, location="", choose_job=None, offline=False, provi
                  limit=20, max_steps=MAX_STEPS, out_dir=OUTPUT_DIR, demo=False):
     """Runs Agent 1 -> Agent 2 -> Agent 3 -> HITL -> Agent 4 handoff.
     Returns {"profile", "jobs_source", "ranked_jobs", "selected", "handoff",
-    "trace_path", "ranked_path"}. selected and handoff are None if the user quits."""
+    "trace_path", "ranked_path"}. selected and handoff are None if the user quits.
+
+    The same run in two halves, for a UI that can't wait inside a callback
+    (a web dashboard): state = prepare_run(...), show state["ranked_jobs"],
+    then finish_run(state, choice) once the user has chosen."""
     if choose_job is None:
         raise ValueError("choose_job is required: a function that picks one ranked job")
+    state = prepare_run(resume_path, location, offline=offline, provider=provider,
+                        limit=limit, max_steps=max_steps, out_dir=out_dir, demo=demo)
+    return finish_run(state, choose_job(state["ranked_jobs"]))
+
+
+def prepare_run(resume_path, location="", offline=False, provider=None,
+                limit=20, max_steps=MAX_STEPS, out_dir=OUTPUT_DIR, demo=False):
+    """First half of run_intervai: Agent 1 -> Agent 2 -> Agent 3, up to the
+    job choice. Writes output/ranked_jobs.json. Returns the run state for
+    finish_run(); state["ranked_jobs"] is what the user chooses from.
+    The state holds the resume text (needed to score a custom role), so keep
+    it in memory only and drop it after finish_run."""
     if offline and demo:
         raise ValueError("use offline (fake jobs) or demo (replay real jobs), not both")
     trace = Trace()
@@ -369,9 +385,25 @@ def run_intervai(resume_path, location="", choose_job=None, offline=False, provi
                 ranked_jobs=os.path.relpath(ranked_path, ROOT) if ranked_path.startswith(ROOT)
                 else ranked_path)
 
+    return {"profile": profile, "location": location, "jobs": jobs, "jobs_source": source,
+            "ranked_jobs": ranked, "ranked_path": ranked_path, "out_dir": out_dir,
+            "trace": trace, "hitl_started": time.time(), "finished": False}
+
+
+def finish_run(state, selected):
+    """Second half of run_intervai: records the user's choice (a ranked job,
+    {"custom_role": "..."} or None to quit), writes the Agent 4 brief unless
+    the user quit, and saves output/run_trace.json. Returns the same dict as
+    run_intervai. A state can be finished only once."""
+    if state.get("finished"):
+        raise ValueError("this run is already finished; call prepare_run again")
+    state["finished"] = True
+    profile, location, jobs, source = (state["profile"], state["location"],
+                                       state["jobs"], state["jobs_source"])
+    ranked, trace, out_dir = state["ranked_jobs"], state["trace"], state["out_dir"]
+
     # Human in the loop: the user picks one job, types a custom role, or quits
-    t = time.time()
-    selected = choose_job(ranked)
+    t = state["hitl_started"]
     custom = isinstance(selected, dict) and "custom_role" in selected
     if custom:
         selected = custom_role_job(selected["custom_role"], location, profile)
@@ -395,7 +427,7 @@ def run_intervai(resume_path, location="", choose_job=None, offline=False, provi
     public_profile = {k: v for k, v in profile.items() if k != "raw_text"}
     return {"profile": public_profile, "jobs_source": source,
             "ranked_jobs": ranked, "selected": selected, "handoff": handoff,
-            "trace_path": trace_path, "ranked_path": ranked_path}
+            "trace_path": trace_path, "ranked_path": state["ranked_path"]}
 
 
 def choose_top_job(ranked):
