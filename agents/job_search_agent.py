@@ -22,8 +22,9 @@ from llm import LLMError, ask_llm
 log = logging.getLogger(__name__)
 
 
-# One-line change to switch models.
-LLM_CONFIG = {"provider": "groq", "model": "llama-3.3-70b-versatile"}
+# One-line change to switch models. Groq retired llama-3.3-70b-versatile for
+# our key (HTTP 404 model_not_found, Nov 2026), so Agent 2 uses gpt-oss-120b.
+LLM_CONFIG = {"provider": "groq", "model": "openai/gpt-oss-120b"}
 
 MAX_STEPS = 4
 MAX_KEYWORDS = 5
