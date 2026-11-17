@@ -160,3 +160,74 @@ def test_quitting_stops_before_agent4(tmp_path):
 def test_choose_job_is_required():
     with pytest.raises(ValueError):
         run_intervai(RESUME, choose_job=None)
+
+
+# ---------- HITL: the terminal chooser ----------
+
+from orchestrator import format_choices, make_terminal_chooser  # noqa: E402
+
+
+def chooser(*answers):
+    """A terminal chooser that 'types' the given answers. Returns (choose, shown)."""
+    answers, shown = list(answers), []
+
+    def ask(prompt):
+        if not answers:
+            raise EOFError
+        return answers.pop(0)
+    return make_terminal_chooser(ask=ask, show=shown.append), shown
+
+
+def ranked_jobs(tmp_path):
+    return run(tmp_path, offline=True)["ranked_jobs"]
+
+
+def test_menu_shows_top_5_with_score_company_and_gaps(tmp_path):
+    ranked = ranked_jobs(tmp_path)
+    menu = format_choices(ranked)
+    assert menu.count("gaps:") == 5                          # 6 jobs, only the top 5 shown
+    first = ranked[0]
+    assert f"1. [{first['score']:5.1f}] {first['title']} - {first['company']}" in menu
+    assert "'c' for a custom role" in menu
+
+
+def test_pick_a_number(tmp_path):
+    ranked = ranked_jobs(tmp_path)
+    choose, _ = chooser("2")
+    assert choose(ranked) is ranked[1]
+
+
+@pytest.mark.parametrize("bad", ["0", "6", "abc", "", "-1", "2.5"])
+def test_bad_input_asks_again(tmp_path, bad):
+    ranked = ranked_jobs(tmp_path)
+    choose, shown = chooser(bad, "1")
+    assert choose(ranked) is ranked[0]
+    assert any("Please type a number from 1 to 5" in s for s in shown)
+
+
+def test_custom_role_is_validated(tmp_path):
+    ranked = ranked_jobs(tmp_path)
+    choose, shown = chooser("c", "", "c", "12345", "c", "Data Engineer")
+    assert choose(ranked) == {"custom_role": "Data Engineer"}
+    assert any("can't be empty" in s for s in shown)
+    assert any("Please type a job title" in s for s in shown)
+
+
+@pytest.mark.parametrize("answers", [("q",), ("QUIT",), ()])        # () = Ctrl-D
+def test_quit(tmp_path, answers):
+    choose, _ = chooser(*answers)
+    assert choose(ranked_jobs(tmp_path)) is None
+
+
+def test_no_jobs_to_choose():
+    choose, shown = chooser("1")
+    assert choose([]) is None and "No jobs" in shown[0]
+
+
+def test_custom_role_goes_through_agent3(tmp_path):
+    result = run(tmp_path, offline=True, choose_job=lambda ranked: {"custom_role": "Data Engineer"})
+    selected = result["selected"]
+    assert selected["id"] == "custom-role" and selected["title"] == "Data Engineer"
+    assert {"score", "assessment", "assessed_by"} <= set(selected)    # same fields as a ranked job
+    hitl = [s for s in trace_of(result) if s["agent"].startswith("Human")][0]
+    assert hitl["details"]["custom_role"] is True

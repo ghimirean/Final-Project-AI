@@ -11,7 +11,10 @@
     result = run_intervai("data/sample.pdf", "Monroe, LA", choose_job=my_callback)
 
 choose_job(ranked_jobs) is called with Agent 3's ranking (best first) and
-returns the chosen ranked job, or None to stop. A dashboard can pass its own.
+returns the chosen ranked job, {"custom_role": "Data Engineer"} to practise
+for a role that isn't in the list, or None to stop. A dashboard can pass its
+own; make_terminal_chooser() is the terminal version (top 5, pick a number,
+'c' for a custom role, 'q' to quit).
 
 If Agent 2 can't search (no JSearch key, quota used up, an error, or no jobs
 found), the fake jobs in tests/fixtures/jobs.json are used instead, with a
@@ -151,12 +154,15 @@ def run_intervai(resume_path, location="", choose_job=None, offline=False, provi
     trace.stage("agent3", time.time() - t, fallback=agent3_fallbacks(ranked),
                 jobs_ranked=len(ranked), top_score=ranked[0]["score"] if ranked else None)
 
-    # Human in the loop: the user picks one job
+    # Human in the loop: the user picks one job, types a custom role, or quits
     t = time.time()
     selected = choose_job(ranked)
+    custom = isinstance(selected, dict) and "custom_role" in selected
+    if custom:
+        selected = custom_role_job(selected["custom_role"], location, profile)
     trace.stage("hitl", time.time() - t,
                 choice=(selected or {}).get("id"), title=(selected or {}).get("title"),
-                quit=selected is None)
+                custom_role=custom, quit=selected is None)
 
     # Agent 4 handoff
     handoff = None
@@ -177,6 +183,65 @@ def choose_top_job(ranked):
     return ranked[0] if ranked else None
 
 
+# ---------- HITL: the terminal chooser ----------
+
+MAX_ROLE_LENGTH = 80
+
+
+def format_choices(ranked, top_n=TOP_N):
+    """The menu: the top jobs with score, title, company and the first gaps."""
+    lines = [f"\nTop {min(top_n, len(ranked))} matches (best first):"]
+    for i, r in enumerate(ranked[:top_n], 1):
+        gaps = r["assessment"]["gaps"]
+        shown = ", ".join(gaps[:3]) + (f" (+{len(gaps) - 3} more)" if len(gaps) > 3 else "")
+        lines.append(f"  {i}. [{r['score']:5.1f}] {r['title']} - {r['company'] or 'unknown company'}")
+        lines.append(f"       gaps: {shown or 'none'}")
+    lines.append(f"Pick a job (1-{min(top_n, len(ranked))}), 'c' for a custom role, or 'q' to quit.")
+    return "\n".join(lines)
+
+
+def make_terminal_chooser(ask=input, show=print, top_n=TOP_N):
+    """Returns a choose_job callback that asks in the terminal. ask/show can
+    be replaced (tests, or another text interface). The callback returns the
+    chosen ranked job, {"custom_role": "..."} or None (quit)."""
+    def choose(ranked):
+        if not ranked:
+            show("No jobs to choose from.")
+            return None
+        count = min(top_n, len(ranked))
+        show(format_choices(ranked, top_n))
+        try:
+            while True:
+                answer = ask("> ").strip().lower()
+                if answer in ("q", "quit", "exit"):
+                    return None
+                if answer in ("c", "custom"):
+                    role = ask("Role to practise for (e.g. Data Engineer): ").strip()
+                    if not role:
+                        show("The role can't be empty.")
+                    elif len(role) > MAX_ROLE_LENGTH or not any(ch.isalpha() for ch in role):
+                        show(f"Please type a job title (letters, at most {MAX_ROLE_LENGTH} characters).")
+                    else:
+                        return {"custom_role": role}
+                    continue
+                if answer.isdigit() and 1 <= int(answer) <= count:
+                    return ranked[int(answer) - 1]
+                show(f"Please type a number from 1 to {count}, 'c' or 'q'.")
+        except (EOFError, KeyboardInterrupt):      # Ctrl-D / Ctrl-C: quit cleanly
+            show("")
+            return None
+    return choose
+
+
+def custom_role_job(role, location, profile):
+    """A job for a role the user typed: Agent 3 ranks it like any posting, so
+    Agent 4 gets the same fields. With no real posting, the role name is the
+    description, so key points and gaps are thin."""
+    job = {"id": "custom-role", "title": role, "company": None, "location": location or "",
+           "url": None, "description": f"{role}."}
+    return rank_jobs(profile, [job])[0]
+
+
 def print_trace(path):
     with open(path, encoding="utf-8") as f:
         stages = json.load(f)["stages"]
@@ -193,9 +258,12 @@ if __name__ == "__main__":
                         help="use the fake fixture jobs instead of JSearch (saves the quota)")
     parser.add_argument("--max-steps", type=int, default=MAX_STEPS,
                         help=f"Agent 2 search steps, each at most one JSearch request (default {MAX_STEPS})")
+    parser.add_argument("--auto", action="store_true",
+                        help="pick the top job without asking (for scripted runs)")
     args = parser.parse_args()
 
-    result = run_intervai(args.resume, args.location, choose_job=choose_top_job,
+    chooser = choose_top_job if args.auto else make_terminal_chooser()
+    result = run_intervai(args.resume, args.location, choose_job=chooser,
                           offline=args.offline, max_steps=args.max_steps)
     print(f"Jobs from: {result['jobs_source']}, ranked: {len(result['ranked_jobs'])}")
     if result["selected"]:
