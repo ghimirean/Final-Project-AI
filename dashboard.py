@@ -27,7 +27,8 @@ import streamlit as st
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(ROOT, "agents"))
-from orchestrator import MAX_STEPS, OUTPUT_DIR, prepare_run  # noqa: E402
+from orchestrator import (MAX_ROLE_LENGTH, MAX_STEPS, OUTPUT_DIR,  # noqa: E402
+                          finish_run, prepare_run)
 
 ALLOWED_TYPES = ("pdf", "docx")
 MODES = {
@@ -36,6 +37,7 @@ MODES = {
     "live": "Live: search JSearch now (spends requests)",
 }
 LIVE_DEFAULT_STEPS = 1
+CUSTOM = "custom"          # the choice value for "a role that isn't in the list"
 
 
 # ---------- non-UI logic (plain functions, tested without Streamlit) ----------
@@ -116,6 +118,44 @@ def bullets(items, empty="none"):
     return "\n".join(f"- {x}" for x in items) if items else f"_{empty}_"
 
 
+def role_problem(role):
+    """Why a typed custom role can't be used, or None if it's fine. Same
+    rules as the terminal chooser."""
+    role = (role or "").strip()
+    if not role:
+        return "Type the role you want to practise for."
+    if len(role) > MAX_ROLE_LENGTH or not any(ch.isalpha() for ch in role):
+        return f"Please type a job title (letters, at most {MAX_ROLE_LENGTH} characters)."
+    return None
+
+
+def make_choice(ranked, picked, role=""):
+    """The value finish_run expects: the ranked job at index `picked`, or
+    {"custom_role": role} when picked is CUSTOM. Raises ValueError if invalid."""
+    if picked == CUSTOM:
+        problem = role_problem(role)
+        if problem:
+            raise ValueError(problem)
+        return {"custom_role": role.strip()}
+    if not isinstance(picked, int) or not 0 <= picked < len(ranked):
+        raise ValueError("pick one of the ranked jobs")
+    return ranked[picked]
+
+
+def choice_label(ranked, picked):
+    """Radio label for a ranked job index or CUSTOM (escaped: untrusted text)."""
+    if picked == CUSTOM:
+        return "A different role (type it below)"
+    job = ranked[picked]
+    return (f"{picked + 1}. {md(job.get('title'), 80)} · "
+            f"{md(job.get('company') or 'unknown company', 60)} "
+            f"({float(job.get('score') or 0):.1f})")
+
+
+def relative(path):
+    return os.path.relpath(path, ROOT) if path and path.startswith(ROOT) else path
+
+
 def breakdown_rows(breakdown):
     """Agent 3's score breakdown as (part, points, detail) rows."""
     b = breakdown or {}
@@ -171,6 +211,63 @@ def job_cards(ranked):
     for i, job in enumerate(ranked, 1):
         job_card(i, job)
 
+
+def choice_form(state):
+    """The human-in-the-loop step: pick a job or type a role, then confirm
+    (writes the Agent 4 brief) or quit (no brief)."""
+    ranked = state["ranked_jobs"]
+    st.subheader("2. Choose the job to practise for")
+    options = list(range(len(ranked))) + [CUSTOM]
+    picked = st.radio("Job", options, format_func=lambda p: choice_label(ranked, p),
+                      key="picked", label_visibility="collapsed")
+    role = ""
+    if picked == CUSTOM:
+        role = st.text_input("Role (e.g. Data Engineer)", max_chars=MAX_ROLE_LENGTH, key="role")
+        st.caption("A custom role has no real posting: Agent 3 scores it from the role "
+                   "name only, so its key points and gaps are thin.")
+    confirm_col, quit_col = st.columns(2)
+    confirm = confirm_col.button("Confirm and prepare the interview", type="primary")
+    quit_ = quit_col.button("Quit without choosing")
+
+    if quit_:
+        finish(state, None)
+    elif confirm:
+        try:
+            choice = make_choice(ranked, picked, role)
+        except ValueError as e:
+            st.error(str(e))
+            return
+        finish(state, choice)
+
+
+def finish(state, choice):
+    """Runs the second half once and keeps only a short summary."""
+    result = finish_run(state, choice)
+    selected = result["selected"]
+    st.session_state["result"] = {
+        "title": selected["title"] if selected else None,
+        "company": selected.get("company") if selected else None,
+        "score": selected.get("score") if selected else None,
+        "brief": relative(result["handoff"]["brief"]) if result["handoff"] else None,
+        "trace": relative(result["trace_path"]),
+    }
+    st.session_state.pop("run", None)          # a run can be finished only once
+    st.rerun()
+
+
+def result_view(summary):
+    if summary["brief"]:
+        st.success(f"Ready for the interview: {md(summary['title'])} · "
+                   f"{md(summary['company'] or 'custom role')} "
+                   f"(score {float(summary['score'] or 0):.1f}).")
+        st.markdown(f"Interview brief for Agent 4: `{summary['brief']}`")
+    else:
+        st.info("Stopped without choosing a job: no interview brief was written.")
+    st.markdown(f"Run trace: `{summary['trace']}`")
+    if st.button("Start over"):
+        st.session_state.pop("result", None)
+        st.rerun()
+
 def sidebar():
     """The inputs. Returns (uploaded file, location, mode, max_steps, pressed)."""
     with st.sidebar:
@@ -199,12 +296,17 @@ def main():
         state = run_agents(upload.name, upload.getvalue(), location, mode, max_steps)
         st.session_state["run"] = state
         st.session_state["mode"] = mode
+        st.session_state.pop("result", None)
 
+    if "result" in st.session_state:
+        result_view(st.session_state["result"])
+        return
     state = st.session_state.get("run")
     if state is None:
         st.info("Upload a resume, choose a mode and click **Find jobs**.")
         return
     st.caption(f"Jobs from: {md(state['jobs_source'])}")
+    choice_form(state)
     job_cards(state["ranked_jobs"])
 
 
