@@ -93,9 +93,18 @@ DEGREE_LEVELS = [
 ]
 
 
+# Like YEARS_PATTERN, but a range counts by its LOWER number:
+# "10-14 years" -> 10, "3 to 7+ years" -> 3, "1 to 3 years" -> 1
+MIN_YEARS_PATTERN = r"(\d+)(?:\s*(?:-|–|to)\s*\d+)?\s*\+?\s*(?:or more\s+)?years?\b"
+# No posting asks for more; bigger numbers are company history
+# ("innovating fearlessly for 40 years", "over 100 years of service")
+MAX_REQUIRED_YEARS = 20
+
+
 def extract_min_years(text):
-    # Takes the largest number found, e.g. "5+ years" -> 5. None found -> 0.
-    numbers = [int(n) for n in re.findall(YEARS_PATTERN, text, re.IGNORECASE)]
+    # Takes the largest requirement found, e.g. "5+ years" -> 5. None found -> 0.
+    numbers = [int(n) for n in re.findall(MIN_YEARS_PATTERN, text, re.IGNORECASE)]
+    numbers = [n for n in numbers if n <= MAX_REQUIRED_YEARS]
     return max(numbers) if numbers else 0
 
 
