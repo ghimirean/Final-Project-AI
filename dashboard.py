@@ -175,7 +175,7 @@ def stage_notices(state, mode):
         notices.append(("info", f"Agent 3 used a fallback: {md(agent3.get('fallback'))}."))
     if not state.get("ranked_jobs"):
         notices.append(("warning", "No jobs were found to choose from. You can still type "
-                                   "a role to practise for."))
+                                   "a role to practice for."))
     return notices
 
 
@@ -218,7 +218,7 @@ def role_problem(role):
     rules as the terminal chooser."""
     role = (role or "").strip()
     if not role:
-        return "Type the role you want to practise for."
+        return "Type the role you want to practice for."
     if len(role) > MAX_ROLE_LENGTH or not any(ch.isalpha() for ch in role):
         return f"Please type a job title (letters, at most {MAX_ROLE_LENGTH} characters)."
     return None
@@ -311,7 +311,7 @@ def choice_form(state):
     """The human-in-the-loop step: pick a job or type a role, then confirm
     (writes the Agent 4 brief) or quit (no brief)."""
     ranked = state["ranked_jobs"]
-    st.subheader("2. Choose the job to practise for")
+    st.subheader("2. Choose the job to practice for")
     options = list(range(len(ranked))) + [CUSTOM]
     picked = st.radio("Job", options, format_func=lambda p: choice_label(ranked, p),
                       key="picked", label_visibility="collapsed")
@@ -399,7 +399,7 @@ def sidebar():
 
 def main():
     st.set_page_config(page_title="INTERVAI - choose a job", layout="wide")
-    st.title("INTERVAI: choose a job to practise for")
+    st.title("INTERVAI: choose a job to practice for")
     upload, location, mode, max_steps, pressed = sidebar()
 
     if pressed and upload is not None:
