@@ -141,3 +141,41 @@ def test_run_intervai_matches_the_two_halves(tmp_path):
     assert whole["selected"]["id"] == halves["selected"]["id"]
     assert [s["agent"] for s in stages_of(whole)] == [s["agent"] for s in stages_of(halves)]
     assert set(whole) == set(halves)
+
+
+# ---------- no stale brief: a new run removes the previous run's brief ----------
+
+def test_choose_then_quit_leaves_no_brief(tmp_path):
+    state = prepare(tmp_path)
+    finish_run(state, state["ranked_jobs"][0])
+    assert os.path.exists(brief_path(tmp_path))               # this run chose a job
+
+    state = prepare(tmp_path)
+    assert not os.path.exists(brief_path(tmp_path))           # removed as the new run starts
+    result = finish_run(state, None)                          # Quit
+    assert result["handoff"] is None
+    assert not os.path.exists(brief_path(tmp_path))           # no old brief left behind
+
+
+def test_abandoned_run_leaves_no_brief(tmp_path):
+    state = prepare(tmp_path)
+    finish_run(state, state["ranked_jobs"][0])
+    prepare(tmp_path)                       # a dashboard run that is never finished
+    assert not os.path.exists(brief_path(tmp_path))
+
+
+def test_new_brief_is_written_after_the_old_one_is_removed(tmp_path):
+    state = prepare(tmp_path)
+    finish_run(state, state["ranked_jobs"][0])
+    state = prepare(tmp_path)
+    finish_run(state, state["ranked_jobs"][1])
+    with open(brief_path(tmp_path), encoding="utf-8") as f:
+        assert json.load(f)["job"]["id"] == state["ranked_jobs"][1]["id"]
+
+
+def test_invalid_call_does_not_delete_the_brief(tmp_path):
+    state = prepare(tmp_path)
+    finish_run(state, state["ranked_jobs"][0])
+    with pytest.raises(ValueError, match="not both"):
+        prepare_run(RESUME, "Remote", offline=True, demo=True, out_dir=str(tmp_path))
+    assert os.path.exists(brief_path(tmp_path))

@@ -323,6 +323,15 @@ def save_ranked_jobs(ranked, profile, out_dir):
     return path
 
 
+def remove_old_brief(out_dir):
+    """Deletes out_dir/interview_brief.json if it is there. Called when a new
+    run starts: from then on the file exists only if THIS run chose a job."""
+    try:
+        os.remove(os.path.join(out_dir, "interview_brief.json"))
+    except FileNotFoundError:
+        pass
+
+
 def handoff_to_agent4(selected, description, profile, jobs_source, out_dir):
     """Writes output/interview_brief.json for Agent 4 and returns where."""
     path = os.path.join(out_dir, "interview_brief.json")
@@ -355,9 +364,13 @@ def prepare_run(resume_path, location="", offline=False, provider=None,
     The state holds the resume text (needed to score a custom role), so keep
     it in memory only and drop it after finish_run.
     on_stage (optional) is called with "agent1", "agent2", "agent3" just
-    before each stage starts, so a UI can show which one is running."""
+    before each stage starts, so a UI can show which one is running.
+    Any old output/interview_brief.json is deleted first, so a run that ends
+    in a Quit (or a dashboard run that is never finished) leaves no brief
+    from an earlier run for Agent 4 to pick up."""
     if offline and demo:
         raise ValueError("use offline (fake jobs) or demo (replay real jobs), not both")
+    remove_old_brief(out_dir)
     trace = Trace()
     on_stage = on_stage or (lambda key: None)
 
