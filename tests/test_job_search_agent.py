@@ -5,6 +5,7 @@ fake and the provider returns canned jobs. All data here is fake.
 
 Run from project root:  python -m pytest -v
 """
+import json
 import os
 import sys
 
@@ -189,6 +190,25 @@ def test_provider_error_does_not_crash(monkeypatch):
 
 
 # ---------- prompt and query helpers ----------
+
+def test_recent_titles_skip_name_like_and_incomplete_entries():
+    profile = dict(PROFILE, experience=[
+        {"company": None, "title": "Priya Nandakumar", "dates": None},      # the name
+        {"company": "Acme", "title": "priya nandakumar", "dates": "2023"},  # the name again
+        {"company": None, "title": "Webmaster", "dates": None},             # incomplete
+        {"company": "Brightline", "title": "Junior Data Analyst",
+         "dates": "Jan 2022 - Dec 2023", "months": 24},
+    ])
+    summary = agent.profile_summary(profile)
+    assert summary["recent_titles"] == ["Junior Data Analyst"]
+    assert "priya" not in json.dumps(summary).lower()
+
+
+def test_recent_titles_keep_a_normal_entry():
+    profile = dict(PROFILE, experience=[
+        {"company": "Acme", "title": "Data Analyst", "dates": "Jan 2022 - Dec 2023"}])
+    assert agent.profile_summary(profile)["recent_titles"] == ["Data Analyst"]
+
 
 def test_prompt_has_no_contact_details_or_raw_text(monkeypatch):
     prompts = script(monkeypatch, FINISH)
