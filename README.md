@@ -530,7 +530,7 @@ or `"llm"` when the optional Groq key points are on.)
 |---|---|
 | `key_points` | the KeyBERT phrases, most relevant first. A phrase that is nothing but skills already listed in `nice_to_have` or `gaps` ("GitHub", "Linux") is dropped, so **each skill appears in only one of key_points / nice_to_have / gaps**; KeyBERT returns 4 spare phrases so 6 remain |
 | `required_skills` | the posting's skills from `data/skills.txt`, minus the nice-to-haves |
-| `nice_to_have` | skills in a sentence with "plus", "bonus", "preferred", "desired", … |
+| `nice_to_have` | skills in a sentence with "plus", "bonus", "preferred", "desired", …, or in the bullet lines under a heading with such a word ("Preferred Qualifications:") up to the next heading. The posting is split at line breaks and bullets as well as at full stops, so a "Preferred" heading never marks the "Minimum Qualifications" list above it. A skill also asked for outside a preferred part stays required |
 | `fit_summary` | the one-line `reason` + "the resume shows K of N key points" |
 | `gaps` | missing required skills, skill/degree/experience key phrases not on the resume, years/degree gaps (never role phrases) |
 | `interview_focus` | up to 3 gaps to probe first, then covered key points to ask for an example of, with the resume evidence |
@@ -820,7 +820,7 @@ see the **Actions** tab on GitHub, or the ✓ / ✗ next to each commit.
 | `tests/test_unseen_layouts.py` | The 3 fake resumes in unseen layouts are readable (the PDF really has two columns) and the checker's field comparison works |
 | `tests/test_orchestrator.py` | The full run with fake Agent 2 LLM/provider: stage order and trace fields, fallbacks recorded, no contact details in the trace, fixture-job fallback (no key, failed searches, no jobs, crash) with a warning, per-search records and real vs fixture job counts in the trace, widening traced and warned, HTTP status in the error warning, no key = no Groq/JSearch calls, `--offline`; the terminal chooser (top 5 menu, number, invalid input asked again, custom role validated, quit / Ctrl-D); custom role through Agent 3; the interview brief (fields, original description, no contact details, free text scrubbed, none when the user quits) |
 | `tests/test_job_synthesizer.py` | Requirement extraction, scoring, penalties, ranking (on the TF-IDF fallback), the optional LLM key points with a fake Groq: score unchanged, no contact details in the prompt, every fallback case |
-| `tests/test_keypoints.py` | Embedding key points: spaCy candidate phrases, the real KeyBERT on a fake embedding model, resume matching (by skill, by similarity, not at all), nice-to-haves, field building, no Groq calls by default, score unchanged, fallbacks, the KeyBERT-vs-Groq matching in `scripts/compare_key_points.py` |
+| `tests/test_keypoints.py` | Embedding key points: spaCy candidate phrases, the real KeyBERT on a fake embedding model, resume matching (by skill, by similarity, not at all), nice-to-haves (cue sentences, "Preferred" sections split at line breaks and bullets, required wins), field building, no Groq calls by default, score unchanged, fallbacks, the KeyBERT-vs-Groq matching in `scripts/compare_key_points.py` |
 | `tests/test_embeddings.py` | Chunking, best-chunk similarity, the 0–40 mapping, scores not depending on other jobs, fallback |
 | `tests/test_pipeline.py` | `run_pipeline` and the `/rank` endpoint (FastAPI `TestClient`) |
 | `tests/test_job_search_agent.py` | Agent 2 loop with a scripted fake LLM: search/finish, merging, repeat queries, step and job limits, rule-based fallback, provider errors (status in the trace, logged warning), per-search records, widening city → state → Remote (and when not to widen), prompt contains no contact details, query cleaning |
@@ -959,7 +959,9 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
 - **The 0.45 / 0.55 thresholds** come from only 3 fake resumes and 6 jobs,
   and fit only this model.
 - **Nice-to-haves are cue words**: only skills in a sentence with "plus",
-  "bonus", "preferred", … are found.
+  "bonus", "preferred", … or under a heading with such a word are found. A
+  heading glued inside a flattened bullet ("• Java Preferred: • Docker") is
+  not recognised.
 
 **Agent 3, key points (optional LLM, off by default)**
 - **Groq free-tier rate limit:** about 3 jobs per minute (88 s for 6 jobs

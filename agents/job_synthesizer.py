@@ -451,13 +451,60 @@ NICE_TO_HAVE_CUES = r"\b(?:plus|bonus|preferred|nice to have|nice-to-have|desire
 MAX_FOCUS = 5
 
 
+# A line that starts with a bullet: "• x", "- x", "* x", "1. x", "2) x"
+BULLET = r"^\s*(?:[•●▪◦‣∙·*-]|\d+[.)])\s+"
+# Words that make a short line without a full stop a section heading
+HEADING_WORDS = (r"\b(?:qualifications?|requirements?|responsibilities|duties|benefits|skills"
+                 r"|education|experience|overview|summary|about|perks|compensation)\b")
+PROSE_WORDS = 12        # a non-bullet line longer than this is a paragraph, not a list item
+
+
+def description_parts(description):
+    """Splits a posting into (text, is_bullet) pieces: one per line, and one
+    per bullet when several bullets were flattened onto one line
+    ("Preferred: • Docker • Linux"). Postings write lists without full stops,
+    so splitting at .!? alone glued whole sections into one "sentence"."""
+    for line in description.splitlines():
+        line_is_bullet = bool(re.match(BULLET, line))
+        for i, piece in enumerate(re.split(r"\s*•\s*", line)):
+            piece = re.sub(BULLET, "", piece).strip()
+            if piece:
+                yield piece, (i > 0 or line_is_bullet)
+
+
+def is_heading(text, is_bullet):
+    """'Preferred Qualifications:', 'Requirements', 'Nice to have' ...: a short
+    non-bullet line that ends with ':' or names a section."""
+    if is_bullet:
+        return False
+    words = len(text.split())
+    if text.endswith(":"):
+        return words <= 8
+    return (words <= 4 and not re.search(r"[.!?]$", text)
+            and bool(re.search(HEADING_WORDS + "|" + NICE_TO_HAVE_CUES, text, re.IGNORECASE)))
+
+
 def nice_to_have_skills(description, skills):
-    """The posting's skills that appear in a 'plus / bonus / preferred' sentence."""
-    nice = []
-    for sentence in re.split(r"(?<=[.!?])\s+", description):
-        if re.search(NICE_TO_HAVE_CUES, sentence, re.IGNORECASE):
-            nice += [s for s in extract_skills(sentence, skills) if s not in nice]
-    return nice
+    """The posting's skills that are a 'plus / bonus / preferred'.
+    A skill counts if its own sentence has the cue ("Docker is a plus."), or if
+    it is under a heading with the cue ("Preferred Qualifications:" followed by
+    bullet lines). The next heading, or a paragraph of prose, ends that section,
+    so a "Preferred" heading never marks the "Minimum Qualifications" above it.
+    A skill the posting also asks for outside a preferred part is required
+    (Java under "Minimum" and "Java-based Web Services" under "Preferred")."""
+    nice, required, in_nice_section = [], set(), False
+    for text, is_bullet in description_parts(description):
+        if is_heading(text, is_bullet):
+            in_nice_section = bool(re.search(NICE_TO_HAVE_CUES, text, re.IGNORECASE))
+        elif not is_bullet and len(text.split()) > PROSE_WORDS:
+            in_nice_section = False
+        for sentence in re.split(r"(?<=[.!?])\s+", text):
+            found = extract_skills(sentence, skills)
+            if in_nice_section or re.search(NICE_TO_HAVE_CUES, sentence, re.IGNORECASE):
+                nice += [s for s in found if s not in nice]
+            else:
+                required.update(found)
+    return [s for s in nice if s not in required]
 
 
 # Words that start a degree / field-of-study clause: "Bachelor's degree in X",
