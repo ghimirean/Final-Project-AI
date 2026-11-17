@@ -318,3 +318,42 @@ def test_no_cache_when_cache_path_is_none(monkeypatch, provider):
     provider.search(QUERY, 10)
     provider.search(QUERY, 10)
     assert len(calls) == 2
+
+# ---------- last_request: what each search did (for the run trace) ----------
+
+def test_last_request_records_status_and_raw_count(monkeypatch, provider):
+    fake_get(monkeypatch, FakeResponse(200, v2(raw_job(1), raw_job(2))))
+    provider.search(QUERY, 10)
+    assert provider.last_request == {"query_text": QUERY_TEXT, "http_status": 200,
+                                     "raw_count": 2, "from_cache": False}
+
+
+def test_last_request_shows_a_real_empty_reply(monkeypatch, provider):
+    fake_get(monkeypatch, FakeResponse(200, v2()))
+    assert provider.search(QUERY, 10) == []
+    assert provider.last_request["http_status"] == 200 and provider.last_request["raw_count"] == 0
+
+
+def test_last_request_marks_cache_hits(monkeypatch, cached_provider):
+    counting_get(monkeypatch, FakeResponse(200, v2(raw_job(1))))
+    cached_provider.search(QUERY, 10)
+    cached_provider.search(QUERY, 10)
+    assert cached_provider.last_request == {"query_text": QUERY_TEXT, "http_status": None,
+                                            "raw_count": 1, "from_cache": True}
+
+
+@pytest.mark.parametrize("status", [401, 403, 429, 500])
+def test_http_errors_carry_the_status_code(monkeypatch, provider, status):
+    fake_get(monkeypatch, FakeResponse(status, {}))
+    with pytest.raises(jp.ProviderError) as error:
+        provider.search(QUERY, 10)
+    assert error.value.status == status and str(status) in str(error.value)
+    assert provider.last_request["http_status"] == status
+    assert provider.last_request["raw_count"] is None      # an error is not "0 jobs"
+
+
+def test_network_error_has_no_status(monkeypatch, provider):
+    fake_get(monkeypatch, requests.ConnectionError("down"))
+    with pytest.raises(jp.ProviderError) as error:
+        provider.search(QUERY, 10)
+    assert error.value.status is None

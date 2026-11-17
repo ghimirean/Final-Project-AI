@@ -351,6 +351,13 @@ corrupt cache file is ignored and rewritten, never fatal. **Delete
 `output/jsearch_cache.json` to get fresh results.** `JSearchProvider(cache_path=None)`
 turns the cache off.
 
+**What each request did.** After every search, `provider.last_request` holds
+`{"query_text", "http_status", "raw_count", "from_cache"}`. `raw_count` is
+the number of jobs in JSearch's reply (`data -> jobs`); an error leaves it
+`None`, so a failure never looks like "0 jobs". `ProviderError.status` is the
+HTTP status code (`None` for network errors). A real JSearch reply looks like
+`{"status": "OK", "request_id", "parameters", "data": {"jobs": [...], "cursor"}}`.
+
 **Result format**
 ```python
 result = run_job_agent(profile, JSearchProvider(), location="Baltimore, MD")
@@ -785,7 +792,7 @@ see the **Actions** tab on GitHub, or the ✓ / ✗ next to each commit.
 | `tests/test_embeddings.py` | Chunking, best-chunk similarity, the 0–40 mapping, scores not depending on other jobs, fallback |
 | `tests/test_pipeline.py` | `run_pipeline` and the `/rank` endpoint (FastAPI `TestClient`) |
 | `tests/test_job_search_agent.py` | Agent 2 loop with a scripted fake LLM: search/finish, merging, repeat queries, step and job limits, rule-based fallback, provider errors, prompt contains no contact details, query cleaning |
-| `tests/test_jsearch_provider.py` | JSearch provider with a fake HTTP call: request building, result parsing, error cases, key never in error messages; query cache in a temp folder: a hit skips the request, expired entries are refreshed, errors and empty results aren't cached, a corrupt file is ignored, `cache_path=None` turns it off |
+| `tests/test_jsearch_provider.py` | JSearch provider with a fake HTTP call: request building, result parsing, error cases with their HTTP status, `last_request` (status, raw count, cache hits), key never in error messages; query cache in a temp folder: a hit skips the request, expired entries are refreshed, errors and empty results aren't cached, a corrupt file is ignored, `cache_path=None` turns it off |
 | `tests/test_search_endpoint.py` | `POST /search`: NER parser used, success, fallback, empty results, bad input (file type, `limit`, `max_steps`), `max_steps` default and pass-through, 502 on job source failure |
 
 **Tests never call a real LLM or job site, or load the real embedding model.**
