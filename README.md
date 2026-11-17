@@ -740,13 +740,26 @@ Without a key, Agent 2 isn't called at all, so no Groq calls are wasted.
 Agents 1 and 3 keep their own fallbacks (rule-based parser; TF-IDF and
 rule-based key points).
 
-**Stage trace** — `output/run_trace.json` (git-ignored), one entry per stage:
+**Stage trace** — `output/run_trace.json` (git-ignored), one entry per stage.
+Agent 2's entry lists every real search (LLM steps, rule fallback, widenings)
+and counts real JSearch jobs apart from fixture jobs:
 ```json
 {"agent": "Agent 2: job search", "kind_of_ai": "generative LLM with tool use",
  "model": "Groq openai/gpt-oss-120b + JSearch (RapidAPI)", "seconds": 4.2,
  "fallback_used": false, "fallback": null,
- "details": {"jobs_source": "jsearch", "jobs_found": 18, "search_mode": "llm", "steps": 3}}
+ "details": {"jobs_source": "jsearch", "jobs_found": 10, "search_mode": "llm", "steps": 2,
+             "real_jobs": 10, "fixture_jobs": 0, "widened_to": ["Louisiana"],
+             "searches": [
+   {"step": 1, "query_text": "Software Engineer Java OOP in Monroe, LA", "location": "Monroe, LA",
+    "http_status": 200, "raw_count": 0, "returned": 0, "from_cache": false},
+   {"step": "widen", "query_text": "Software Engineer in Louisiana", "location": "Louisiana",
+    "http_status": 200, "raw_count": 10, "returned": 10, "from_cache": false,
+    "widened_from": "Monroe, LA"}]}}
 ```
+A failed search is printed as `WARNING [Orchestrator]: Agent 2 search failed
+(HTTP 429) ...` and the fallback reason names the status, so "the source
+failed" never reads as "found no jobs". The command line prints the searches
+after the stage table.
 
 **Agent 4 handoff** — `output/interview_brief.json` (git-ignored). This is
 the contract with Agent 4 (`brief_version` changes if the format does):
@@ -805,7 +818,7 @@ see the **Actions** tab on GitHub, or the ✓ / ✗ next to each commit.
 | `tests/test_train_ner.py` | Train/test split, exact-match P/R/F1 on known cases, a 1-epoch training smoke run, the committed model's saved metrics |
 | `tests/test_parser_ner.py` | NER parser with a fake "perfect" model: same profile as rules on the 3 fixtures, skill entity linking (aliases, unknown skills dropped, text matches added), planned-work skills dropped, company recovered from "Company | Title", Python date math, model mistakes filtered (fake dates, project roles, links), loud fallback when the model is missing, broken or crashes, pipeline default; plus the real committed model (F1 ≥ 0.90 on the hand-annotated resumes) |
 | `tests/test_unseen_layouts.py` | The 3 fake resumes in unseen layouts are readable (the PDF really has two columns) and the checker's field comparison works |
-| `tests/test_orchestrator.py` | The full run with fake Agent 2 LLM/provider: stage order and trace fields, fallbacks recorded, no contact details in the trace, fixture-job fallback (no key, failed searches, no jobs, crash) with a warning, no key = no Groq/JSearch calls, `--offline`; the terminal chooser (top 5 menu, number, invalid input asked again, custom role validated, quit / Ctrl-D); custom role through Agent 3; the interview brief (fields, original description, no contact details, free text scrubbed, none when the user quits) |
+| `tests/test_orchestrator.py` | The full run with fake Agent 2 LLM/provider: stage order and trace fields, fallbacks recorded, no contact details in the trace, fixture-job fallback (no key, failed searches, no jobs, crash) with a warning, per-search records and real vs fixture job counts in the trace, widening traced and warned, HTTP status in the error warning, no key = no Groq/JSearch calls, `--offline`; the terminal chooser (top 5 menu, number, invalid input asked again, custom role validated, quit / Ctrl-D); custom role through Agent 3; the interview brief (fields, original description, no contact details, free text scrubbed, none when the user quits) |
 | `tests/test_job_synthesizer.py` | Requirement extraction, scoring, penalties, ranking (on the TF-IDF fallback), the optional LLM key points with a fake Groq: score unchanged, no contact details in the prompt, every fallback case |
 | `tests/test_keypoints.py` | Embedding key points: spaCy candidate phrases, the real KeyBERT on a fake embedding model, resume matching (by skill, by similarity, not at all), nice-to-haves, field building, no Groq calls by default, score unchanged, fallbacks, the KeyBERT-vs-Groq matching in `scripts/compare_key_points.py` |
 | `tests/test_embeddings.py` | Chunking, best-chunk similarity, the 0–40 mapping, scores not depending on other jobs, fallback |

@@ -323,3 +323,69 @@ def test_agent2_llm_failure_is_a_recorded_fallback(tmp_path, monkeypatch, capsys
     assert agent2["details"]["search_mode"] == "rules"
     assert "model_not_found" in agent2["details"]["llm_error"]
     assert "WARNING [Orchestrator]: Agent 2's LLM failed" in capsys.readouterr().err
+
+
+# ---------- Agent 2 searches in the trace; real vs fixture jobs ----------
+
+class StatusProvider(FakeProvider):
+    """FakeProvider that also sets last_request like JSearchProvider."""
+
+    def __init__(self, by_location=None, error=None):
+        super().__init__(error=error)
+        self.by_location, self.locations = by_location or {}, []
+
+    def search(self, query, limit):
+        self.calls += 1
+        loc = query.get("location", "")
+        self.locations.append(loc)
+        self.last_request = {"query_text": f"{query['title']} in {loc}",
+                             "http_status": getattr(self.error, "status", 200),
+                             "raw_count": None, "from_cache": False}
+        if self.error:
+            raise self.error
+        jobs = self.by_location.get(loc, [])
+        self.last_request["raw_count"] = len(jobs)
+        return jobs
+
+
+def run_at(tmp_path, location, **kwargs):
+    return run_intervai(RESUME, location, choose_job=pick_first, out_dir=str(tmp_path), **kwargs)
+
+
+def test_trace_lists_each_search_and_real_job_count(tmp_path, agent2_llm):
+    result = run(tmp_path, provider=StatusProvider({"Remote": [raw_job(1), raw_job(2)]}))
+    details = trace_of(result)[1]["details"]
+    assert details["real_jobs"] == 2 and details["fixture_jobs"] == 0
+    assert details["searches"] == [{"step": 1, "query_text": "Data Analyst in Remote",
+                                    "location": "Remote", "http_status": 200, "raw_count": 2,
+                                    "returned": 2, "from_cache": False}]
+
+
+def test_fixture_jobs_are_counted_apart_from_real_jobs(tmp_path, agent2_llm):
+    result = run(tmp_path, provider=StatusProvider())          # 0 jobs everywhere
+    details = trace_of(result)[1]["details"]
+    assert details["real_jobs"] == 0 and details["fixture_jobs"] == len(FIXTURE_IDS)
+    assert details["searches"][0]["http_status"] == 200 and details["searches"][0]["raw_count"] == 0
+
+
+def test_widening_is_traced_and_warned(tmp_path, agent2_llm, capsys):
+    provider = StatusProvider({"Louisiana": [raw_job(1)]})
+    result = run_at(tmp_path, "Monroe, LA", provider=provider)
+    assert result["jobs_source"] == "jsearch" and provider.locations == ["Monroe, LA", "Louisiana"]
+    details = trace_of(result)[1]["details"]
+    assert details["widened_to"] == ["Louisiana"] and details["real_jobs"] == 1
+    widen = details["searches"][-1]
+    assert widen["step"] == "widen" and widen["widened_from"] == "Monroe, LA"
+    assert widen["location"] == "Louisiana" and widen["raw_count"] == 1
+    assert "widened to: Louisiana" in capsys.readouterr().err
+
+
+def test_search_error_warning_shows_the_status_code(tmp_path, agent2_llm, capsys):
+    from jsearch_provider import ProviderError
+    error = ProviderError("JSearch rate limit or monthly quota reached (HTTP 429)", 429)
+    result = run_at(tmp_path, "Monroe, LA", provider=StatusProvider(error=error))
+    err = capsys.readouterr().err
+    assert "WARNING [Orchestrator]: Agent 2 search failed (HTTP 429)" in err
+    agent2 = trace_of(result)[1]
+    assert "HTTP 429" in agent2["fallback"] and "found no jobs" not in agent2["fallback"]
+    assert agent2["details"]["searches"][0]["http_status"] == 429
