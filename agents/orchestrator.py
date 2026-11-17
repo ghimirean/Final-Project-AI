@@ -22,8 +22,9 @@ visible WARNING. offline=True (--offline) uses them on purpose, to save the
 JSearch quota during rehearsals.
 
 Every stage is logged (agent, kind of AI, model, seconds, fallback) to
-output/run_trace.json. The chosen job and a candidate summary go to Agent 4
-in output/interview_brief.json (format: README, "Orchestrator"). Neither file
+output/run_trace.json. Agent 3's full ranking (best first, same format as
+`python agents/job_synthesizer.py`) is saved to output/ranked_jobs.json. The chosen job and a candidate summary go to Agent 4
+in output/interview_brief.json (format: README, "Orchestrator"). None of these files
 holds the candidate's name, email, phone or links.
 
 Command line (from the project root):
@@ -226,6 +227,22 @@ def build_brief(selected, description, profile, jobs_source):
     }
 
 
+def save_ranked_jobs(ranked, profile, out_dir):
+    """Writes Agent 3's full ranking to output/ranked_jobs.json and returns
+    where. Text quoted from the resume is scrubbed like the interview brief."""
+    name = profile.get("name")
+    public = []
+    for r in ranked:
+        a = dict(r["assessment"])
+        for key in ("key_points", "gaps", "interview_focus"):
+            a[key] = [scrub(x, name) for x in a.get(key, [])]
+        a["fit_summary"] = scrub(a.get("fit_summary"), name)
+        public.append(dict(r, assessment=a))
+    path = os.path.join(out_dir, "ranked_jobs.json")
+    save_json(public, path)
+    return path
+
+
 def handoff_to_agent4(selected, description, profile, jobs_source, out_dir):
     """Writes output/interview_brief.json for Agent 4 and returns where."""
     path = os.path.join(out_dir, "interview_brief.json")
@@ -237,7 +254,7 @@ def run_intervai(resume_path, location="", choose_job=None, offline=False, provi
                  limit=20, max_steps=MAX_STEPS, out_dir=OUTPUT_DIR):
     """Runs Agent 1 -> Agent 2 -> Agent 3 -> HITL -> Agent 4 handoff.
     Returns {"profile", "jobs_source", "ranked_jobs", "selected", "handoff",
-    "trace_path"}. selected and handoff are None if the user quits."""
+    "trace_path", "ranked_path"}. selected and handoff are None if the user quits."""
     if choose_job is None:
         raise ValueError("choose_job is required: a function that picks one ranked job")
     trace = Trace()
@@ -262,8 +279,11 @@ def run_intervai(resume_path, location="", choose_job=None, offline=False, provi
     # Agent 3: embeddings ranking + key points
     t = time.time()
     ranked = rank_jobs(profile, jobs)
+    ranked_path = save_ranked_jobs(ranked, profile, out_dir)
     trace.stage("agent3", time.time() - t, fallback=agent3_fallbacks(ranked),
-                jobs_ranked=len(ranked), top_score=ranked[0]["score"] if ranked else None)
+                jobs_ranked=len(ranked), top_score=ranked[0]["score"] if ranked else None,
+                ranked_jobs=os.path.relpath(ranked_path, ROOT) if ranked_path.startswith(ROOT)
+                else ranked_path)
 
     # Human in the loop: the user picks one job, types a custom role, or quits
     t = time.time()
@@ -291,7 +311,7 @@ def run_intervai(resume_path, location="", choose_job=None, offline=False, provi
     public_profile = {k: v for k, v in profile.items() if k != "raw_text"}
     return {"profile": public_profile, "jobs_source": source,
             "ranked_jobs": ranked, "selected": selected, "handoff": handoff,
-            "trace_path": trace_path}
+            "trace_path": trace_path, "ranked_path": ranked_path}
 
 
 def choose_top_job(ranked):
@@ -400,3 +420,4 @@ if __name__ == "__main__":
         print("No job chosen: stopped before Agent 4.")
     print_trace(result["trace_path"])
     print(f"\nTrace saved to {os.path.relpath(result['trace_path'], ROOT)}")
+    print(f"Ranked jobs saved to {os.path.relpath(result['ranked_path'], ROOT)}")

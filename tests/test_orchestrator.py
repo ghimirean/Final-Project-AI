@@ -389,3 +389,44 @@ def test_search_error_warning_shows_the_status_code(tmp_path, agent2_llm, capsys
     agent2 = trace_of(result)[1]
     assert "HTTP 429" in agent2["fallback"] and "found no jobs" not in agent2["fallback"]
     assert agent2["details"]["searches"][0]["http_status"] == 429
+
+
+# ---------- output/ranked_jobs.json ----------
+
+def test_full_ranking_is_saved_best_first(tmp_path, agent2_llm):
+    result = run(tmp_path, provider=FakeProvider([raw_job(1), raw_job(2), raw_job(3)]))
+    assert result["ranked_path"] == str(tmp_path / "ranked_jobs.json")
+    saved = json.load(open(result["ranked_path"], encoding="utf-8"))
+    assert [r["id"] for r in saved] == [r["id"] for r in result["ranked_jobs"]]
+    assert len(saved) == 3
+    scores = [r["score"] for r in saved]
+    assert scores == sorted(scores, reverse=True)
+    assert {"score", "breakdown", "assessment"} <= set(saved[0])
+    assert trace_of(result)[2]["details"]["ranked_jobs"].endswith("ranked_jobs.json")
+
+
+def test_ranking_is_saved_for_fixture_jobs_and_when_the_user_quits(tmp_path):
+    result = run(tmp_path, offline=True, choose_job=lambda ranked: None)
+    saved = json.load(open(result["ranked_path"], encoding="utf-8"))
+    assert {r["id"] for r in saved} == FIXTURE_IDS
+
+
+def test_ranking_file_has_no_contact_details(tmp_path):
+    result = run(tmp_path, offline=True)
+    text = open(result["ranked_path"], encoding="utf-8").read()
+    for private in ("Priya", "Nandakumar", "priya.nandakumar@example.com", "linkedin"):
+        assert private not in text
+
+
+def test_save_ranked_jobs_scrubs_resume_quotes(tmp_path):
+    ranked = [{"id": "x", "title": "Dev", "score": 50.0, "breakdown": {},
+               "assessment": {"key_points": ["Java"], "gaps": [],
+                              "interview_focus": ["Priya Nandakumar built it (priya@example.com, "
+                                                  "555-201-3344, linkedin.com/in/priya)"],
+                              "fit_summary": "Priya Nandakumar matches 1 of 2."}}]
+    path = orchestrator.save_ranked_jobs(ranked, {"name": "Priya Nandakumar"}, str(tmp_path))
+    text = open(path, encoding="utf-8").read()
+    for private in ("Priya", "priya@example.com", "555-201-3344", "linkedin"):
+        assert private not in text
+    assert "the candidate built it" in text
+    assert ranked[0]["assessment"]["fit_summary"].startswith("Priya")     # input not changed
