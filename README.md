@@ -970,6 +970,9 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
 
 **Agent 1, both paths**
 - **No OCR.** Scanned or image-only PDFs give no text.
+- **Experience years count every job**, related or not: on sample.pdf a
+  cashier job (28 months) makes 2.6 years. So Agent 2 asks for "mid" level
+  jobs and Agent 3's gaps say "candidate has 2.6" for a student.
 - Overlapping jobs are added together, and year-only dates are approximated
   (start = January, end = December).
 
@@ -982,17 +985,20 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
 - **Short queries only:** the query is the title plus 2 keywords, so a long
   skills list can't all be searched in one query. The agent can try different
   pairs across its steps, and Agent 3 ranks with the full resume.
-- **Location:** the location you pass always wins, and the agent can't widen
-  it. Small markets can return very few jobs (one test returned 1), so try a
-  bigger city or leave it blank.
+- **Location:** the location you pass always wins. If every search there is
+  empty, the agent widens city → state → Remote by itself (up to 2 extra
+  requests), so the jobs shown can be in another city of the state, or remote.
 - **Rule-based fallback title:** it uses the first experience entry's title,
   which can be an odd title (for example "Student Webmaster") that returns
   nothing.
-- **Search quality varies:** the LLM can pick poor queries, and output can
-  differ between runs. Job titles and companies shown to the LLM are data
+- **Search quality varies:** the LLM can pick poor queries. Temperature 0 and
+  a fixed seed make runs repeat most of the time, but Groq doesn't promise
+  it; use `--demo` when the jobs must be the same. Job titles and companies shown to the LLM are data
   from outside, so job postings could contain instructions aimed at the model.
 - **Aggregated postings:** JSearch collects postings from other boards, so
-  some may be stale or duplicated. Descriptions are full text, which Agent 3
+  some may be stale. Duplicates are dropped when the title and company match
+  and the location or the text matches; a re-post with edited text in another
+  city is still shown twice. Descriptions are full text, which Agent 3
   needs.
 - **No experience-level filter:** the profile's level is not sent to JSearch.
 
@@ -1022,8 +1028,10 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
 
 **Agent 3, scoring**
 - **Job requirement parsing is regex-based**: `min_years` takes the largest
-  "N years" in the text, even if it isn't about experience (e.g. "founded
-  10 years ago"). "MS"/"M.S." only counts as a Master's in a degree context
+  "N years" in the text (a range counts by its lower number, numbers above 20
+  are ignored as company history). A small number that isn't about
+  experience still counts ("founded 10 years ago"), and alternatives take the
+  larger number ("5+ years with a Bachelor's or 4+ with a Master's" → 5). "MS"/"M.S." only counts as a Master's in a degree context
   ("MS in …", "M.S. degree", "Degree: MS", "BS/MS"), so "MS Excel" is ignored,
   but an unusual phrasing like "MS required" is missed.
 - **Embedding similarity is noisy.** The anchors (0.25 / 0.55) come from 4
@@ -1036,3 +1044,24 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
 - **The TF-IDF fallback is bag-of-words** and its scores are relative to
   the job list (see above).
 - **The API has no authentication** and is meant for local use and demos.
+- **Text similarity can lead the ranking.** A posting that lists few known
+  skills is ranked almost only by text similarity: in the Louisiana demo set
+  Epic is first (35.3) with 0 of 3 skills, because its "software developer"
+  text reads like the resume.
+- **A skill mentioned anywhere counts as asked for.** Epic's "analytics and
+  machine learning tools to drive innovation" (about the team) makes Machine
+  Learning a gap.
+- **Key points can come from boilerplate**: the benefits, hiring or legal
+  part of a posting ("employer-sponsored immigration support", "recruiting
+  process", "comprehensive benefits package"). A key point that is only the
+  company's name is dropped, but one that contains it ("Epic customers") or a
+  short form of it ("Louisiana Blue") is kept.
+
+**Orchestrator**
+- **`--demo` replays the jobs of the last real run** (or the newest cache
+  entry), found for that run's location; `--location` doesn't change them.
+  The trace records the original location or query.
+- **The terminal menu shows the top 5 only**, and "gaps" there mix skills,
+  degrees and years ("+3 more" can be a years gap).
+- **Output files are overwritten by every run** (`run_trace.json`,
+  `ranked_jobs.json`, `interview_brief.json`); copy them to keep a run.
