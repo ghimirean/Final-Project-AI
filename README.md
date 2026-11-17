@@ -7,7 +7,7 @@ the **pipeline / API**, and the **orchestrator** that runs them all and hands th
 | Agent | Kind of AI | Model | What the model does | Fallback |
 |---|---|---|---|---|
 | Agent 1 | **NLP: named-entity recognition** (supervised, trained by us) | spaCy `en_core_web_sm`, fine-tuned on 48 annotated resumes → `models/resume_ner/` | Finds names, companies, schools, degrees, job titles, skills and dates in the resume | Rule-based parser |
-| Agent 2 | **LLM agent** (reason → act → observe loop with a search tool) | Groq `llama-3.3-70b-versatile` | Decides which job searches to run and searches again if results are weak | Rule-based query from the profile |
+| Agent 2 | **LLM agent** (reason → act → observe loop with a search tool) | Groq `openai/gpt-oss-120b` | Decides which job searches to run and searches again if results are weak | Rule-based query from the profile |
 | Agent 3 | **Semantic embeddings / semantic search** (no LLM) | local `all-MiniLM-L6-v2` (sentence-transformers) + KeyBERT | (1) Text-similarity part of the match score; (2) key points per job: KeyBERT picks the posting's key phrases, embedding search checks each against the resume, giving fit, gaps and interview topics | TF-IDF (score), rule-based key points |
 
 Each agent uses a different kind of AI. **Agent 2 is the only LLM agent.**
@@ -60,7 +60,7 @@ Every LLM call (Agent 2, and the optional LLM modes of Agents 1 and 3) goes thro
   read from `.env` with python-dotenv. Keys are never printed or committed.
 - **Per-agent model:** each agent sets its provider and model in one
   `LLM_CONFIG` dict at the top of its file, so switching models is a
-  one-line change. Agent 2 uses `{"provider": "groq", "model": "llama-3.3-70b-versatile"}`.
+  one-line change. Agent 2 uses `{"provider": "groq", "model": "openai/gpt-oss-120b"}`.
   Agent 3's optional key points use `{"provider": "groq", "model": "qwen/qwen3.8-27b"}`.
   Agent 1's optional LLM parser uses `{"provider": "gemini", "model": "gemini-3.5-flash"}`.
 - **Validated JSON:** pass a pydantic model as `schema` and the reply is
@@ -717,7 +717,7 @@ rule-based key points).
 **Stage trace** — `output/run_trace.json` (git-ignored), one entry per stage:
 ```json
 {"agent": "Agent 2: job search", "kind_of_ai": "generative LLM with tool use",
- "model": "Groq llama-3.3-70b-versatile + JSearch (RapidAPI)", "seconds": 4.2,
+ "model": "Groq openai/gpt-oss-120b + JSearch (RapidAPI)", "seconds": 4.2,
  "fallback_used": false, "fallback": null,
  "details": {"jobs_source": "jsearch", "jobs_found": 18, "search_mode": "llm", "steps": 3}}
 ```
