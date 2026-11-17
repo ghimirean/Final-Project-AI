@@ -27,8 +27,8 @@ import streamlit as st
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(ROOT, "agents"))
-from orchestrator import (MAX_ROLE_LENGTH, MAX_STEPS, OUTPUT_DIR,  # noqa: E402
-                          finish_run, prepare_run)
+from orchestrator import (DEMO_REPLAY, MAX_ROLE_LENGTH, MAX_STEPS,  # noqa: E402
+                          OUTPUT_DIR, STAGES, finish_run, prepare_run)
 
 ALLOWED_TYPES = ("pdf", "docx")
 MODES = {
@@ -70,18 +70,101 @@ def file_extension(filename):
 
 
 def run_agents(filename, data, location, mode, max_steps=LIVE_DEFAULT_STEPS,
-               prepare=prepare_run):
+               prepare=prepare_run, on_stage=None):
     """Writes the uploaded resume to a temp file, runs Agents 1-3 on it and
-    deletes the file again, even if an agent fails. Returns the run state."""
+    deletes the file again, even if an agent fails. Returns the run state.
+    on_stage("agent1" | "agent2" | "agent3") is called as each stage starts."""
     options = mode_options(mode, max_steps)
     ext = file_extension(filename)
     fd, path = tempfile.mkstemp(suffix=ext, prefix="intervai_resume_")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
-        return prepare(path, (location or "").strip(), out_dir=output_dir(), **options)
+        return prepare(path, (location or "").strip(), out_dir=output_dir(),
+                       on_stage=on_stage, **options)
     finally:
         os.remove(path)
+
+
+# ---------- loading and error messages ----------
+
+def stage_message(key, mode):
+    """What the spinner says while a stage runs."""
+    if key == "agent1":
+        return "Agent 1: reading your resume (NER model)..."
+    if key == "agent2":
+        return {"live": "Agent 2: searching for jobs (Groq + JSearch, can take 10-30 seconds)...",
+                "demo": "Agent 2: replaying the last real search results (no API calls)...",
+                "offline": "Agent 2: loading the fake practice jobs (no API calls)..."}.get(
+                    mode, "Agent 2: finding jobs...")
+    if key == "agent3":
+        return "Agent 3: ranking the jobs and writing key points (embeddings)..."
+    return "Working..."
+
+
+def failure_message(stage, error):
+    """A clear message for a stage that raised an error."""
+    what = f"{type(error).__name__}: {error}"
+    if stage in STAGES:
+        return f"{STAGES[stage]['agent']} failed, so no jobs can be shown. ({what})"
+    return f"Could not start the run. ({what})"
+
+
+def stage_entry(state, key):
+    """The run-trace entry for one stage (agent1/agent2/agent3), or {}."""
+    name = STAGES[key]["agent"]
+    for entry in state["trace"].stages:
+        if entry["agent"] == name:
+            return entry
+    return {}
+
+
+def stage_notices(state, mode):
+    """(level, message) pairs about fallbacks and empty results, in the order
+    they should be shown. level is "error", "warning" or "info"."""
+    notices = []
+    agent1, agent2, agent3 = (stage_entry(state, k) for k in ("agent1", "agent2", "agent3"))
+    if agent1.get("fallback_used"):
+        notices.append(("info", "Agent 1 could not use the NER model, so the rule-based "
+                                "parser read your resume."))
+    source = state.get("jobs_source")
+    reason = str(agent2.get("fallback") or "")
+    details = agent2.get("details") or {}
+    if source == DEMO_REPLAY:
+        notices.append(("info", f"Demo mode: replaying {details.get('real_jobs', 0)} real jobs "
+                                f"saved {details.get('saved') or 'earlier'} (no API calls)."))
+    elif source == "fixture" and mode == "offline":
+        notices.append(("info", "Offline mode: these are fake practice jobs (no API calls)."))
+    elif source == "fixture" and mode == "demo":
+        notices.append(("warning", "Demo mode found no saved real jobs, so these are fake "
+                                   "practice jobs. Do one live run first to save real jobs."))
+    elif source == "fixture":
+        if "429" in reason or "quota" in reason.lower():
+            notices.append(("error", "The job source is out of requests (JSearch quota used up "
+                                     "or rate limit, HTTP 429). Showing fake practice jobs "
+                                     "instead. Use demo mode, or wait for the quota to reset."))
+        elif "no JSearch key" in reason:
+            notices.append(("error", "No JSearch key: RAPIDAPI_KEY is not set in .env. "
+                                     "Showing fake practice jobs instead."))
+        elif "found no jobs" in reason:
+            notices.append(("warning", "The live search found no jobs. Showing fake practice "
+                                       "jobs instead. Try a bigger city, or leave the location "
+                                       "blank."))
+        else:
+            notices.append(("error", f"The job search failed ({md(reason, 200)}). "
+                                     "Showing fake practice jobs instead."))
+    elif source == "jsearch" and agent2.get("fallback_used"):
+        notices.append(("info", "Agent 2's LLM could not plan the search, so a rule-based "
+                                "search query was used."))
+    if details.get("widened_to"):
+        notices.append(("info", "No jobs in that location, so the search was widened to: "
+                                + ", ".join(md(x) for x in details["widened_to"]) + "."))
+    if agent3.get("fallback_used"):
+        notices.append(("info", f"Agent 3 used a fallback: {md(agent3.get('fallback'))}."))
+    if not state.get("ranked_jobs"):
+        notices.append(("warning", "No jobs were found to choose from. You can still type "
+                                   "a role to practise for."))
+    return notices
 
 
 # Job titles, companies, descriptions and links come from the internet, so
@@ -242,7 +325,17 @@ def choice_form(state):
 
 def finish(state, choice):
     """Runs the second half once and keeps only a short summary."""
-    result = finish_run(state, choice)
+    message = ("Scoring your role and writing the interview brief..." if
+               isinstance(choice, dict) and "custom_role" in choice else
+               "Writing the interview brief and the run trace..." if choice else
+               "Saving the run trace...")
+    try:
+        with st.spinner(message):
+            result = finish_run(state, choice)
+    except Exception as e:
+        st.session_state.pop("run", None)      # a half-finished run can't be reused
+        st.error(f"Could not finish the run, please start over. ({type(e).__name__}: {e})")
+        return
     selected = result["selected"]
     st.session_state["result"] = {
         "title": selected["title"] if selected else None,
@@ -265,7 +358,8 @@ def result_view(summary):
         st.info("Stopped without choosing a job: no interview brief was written.")
     st.markdown(f"Run trace: `{summary['trace']}`")
     if st.button("Start over"):
-        st.session_state.pop("result", None)
+        for key in ("result", "error"):
+            st.session_state.pop(key, None)
         st.rerun()
 
 def sidebar():
@@ -293,21 +387,47 @@ def main():
 
     if pressed and upload is not None:
         # The only place Agents 1-3 run: never on a plain rerun
-        state = run_agents(upload.name, upload.getvalue(), location, mode, max_steps)
-        st.session_state["run"] = state
-        st.session_state["mode"] = mode
-        st.session_state.pop("result", None)
+        find_jobs(upload, location, mode, max_steps)
 
+    if "error" in st.session_state:
+        st.error(st.session_state["error"])
     if "result" in st.session_state:
         result_view(st.session_state["result"])
         return
     state = st.session_state.get("run")
     if state is None:
-        st.info("Upload a resume, choose a mode and click **Find jobs**.")
+        if "error" not in st.session_state:
+            st.info("Upload a resume, choose a mode and click **Find jobs**.")
         return
     st.caption(f"Jobs from: {md(state['jobs_source'])}")
+    for level, message in stage_notices(state, st.session_state.get("mode")):
+        getattr(st, level)(message)
     choice_form(state)
     job_cards(state["ranked_jobs"])
+
+
+def find_jobs(upload, location, mode, max_steps):
+    """Runs Agents 1-3 with a spinner per stage. On success the state goes
+    to st.session_state["run"]; on failure a message to ["error"]."""
+    for key in ("run", "result", "error"):
+        st.session_state.pop(key, None)
+    current = {"stage": None}
+    with st.status("Finding jobs...", expanded=True) as status:
+        def on_stage(key):
+            current["stage"] = key
+            status.update(label=stage_message(key, mode))
+            st.write(stage_message(key, mode))
+        try:
+            state = run_agents(upload.name, upload.getvalue(), location, mode, max_steps,
+                               on_stage=on_stage)
+        except Exception as e:
+            status.update(label="Finding jobs failed", state="error", expanded=False)
+            st.session_state["error"] = failure_message(current["stage"], e)
+            return
+        status.update(label=f"Found {len(state['ranked_jobs'])} jobs", state="complete",
+                      expanded=False)
+    st.session_state["run"] = state
+    st.session_state["mode"] = mode
 
 
 if __name__ == "__main__":

@@ -45,6 +45,25 @@ def test_prepare_run_ranks_jobs_and_stops_before_the_choice(tmp_path):
         "Agent 1: resume parser", "Agent 2: job search", "Agent 3: ranking and key points"]
 
 
+def test_prepare_run_reports_each_stage_before_it_starts(tmp_path):
+    seen = []
+    state = prepare(tmp_path, on_stage=seen.append)
+    assert seen == ["agent1", "agent2", "agent3"]
+    assert state["ranked_jobs"]
+
+
+def test_a_failing_stage_is_the_last_one_reported(tmp_path, monkeypatch):
+    import orchestrator
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("ranking broke")
+    monkeypatch.setattr(orchestrator, "rank_jobs", broken)
+    seen = []
+    with pytest.raises(RuntimeError, match="ranking broke"):
+        prepare(tmp_path, on_stage=seen.append)
+    assert seen[-1] == "agent3"
+
+
 def test_prepare_run_rejects_offline_and_demo_together(tmp_path):
     with pytest.raises(ValueError, match="not both"):
         prepare(tmp_path, demo=True)

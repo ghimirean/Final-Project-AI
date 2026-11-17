@@ -347,17 +347,22 @@ def run_intervai(resume_path, location="", choose_job=None, offline=False, provi
 
 
 def prepare_run(resume_path, location="", offline=False, provider=None,
-                limit=20, max_steps=MAX_STEPS, out_dir=OUTPUT_DIR, demo=False):
+                limit=20, max_steps=MAX_STEPS, out_dir=OUTPUT_DIR, demo=False,
+                on_stage=None):
     """First half of run_intervai: Agent 1 -> Agent 2 -> Agent 3, up to the
     job choice. Writes output/ranked_jobs.json. Returns the run state for
     finish_run(); state["ranked_jobs"] is what the user chooses from.
     The state holds the resume text (needed to score a custom role), so keep
-    it in memory only and drop it after finish_run."""
+    it in memory only and drop it after finish_run.
+    on_stage (optional) is called with "agent1", "agent2", "agent3" just
+    before each stage starts, so a UI can show which one is running."""
     if offline and demo:
         raise ValueError("use offline (fake jobs) or demo (replay real jobs), not both")
     trace = Trace()
+    on_stage = on_stage or (lambda key: None)
 
     # Agent 1: NER resume parser
+    on_stage("agent1")
     t = time.time()
     profile = parse_resume_ner(resume_path, skills_path=SKILLS_PATH)
     trace.stage("agent1", time.time() - t,
@@ -366,6 +371,7 @@ def prepare_run(resume_path, location="", offline=False, provider=None,
                 jobs=len(profile["experience"]))
 
     # Agent 2: LLM job search with the JSearch tool (or the fixture jobs)
+    on_stage("agent2")
     t = time.time()
     provider = provider or JSearchProvider()
     jobs, source, fallback, details = search_jobs_with_fallback(
@@ -377,6 +383,7 @@ def prepare_run(resume_path, location="", offline=False, provider=None,
                 location=location or None, **details)
 
     # Agent 3: embeddings ranking + key points
+    on_stage("agent3")
     t = time.time()
     ranked = rank_jobs(profile, jobs)
     ranked_path = save_ranked_jobs(ranked, profile, out_dir)
