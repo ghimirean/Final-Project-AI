@@ -108,12 +108,36 @@ def experience_level(years):
     return "senior"
 
 
+def usable_titles(profile, limit=3):
+    """Job titles from profile["experience"] that are safe to search with, in
+    order (most recent first), at most `limit`. An entry is skipped if its
+    title is empty, its title is the candidate's name (case-insensitive; the
+    NER parser can tag the name as a job title), or it has neither a company
+    nor dates (an incomplete entry, likely a parsing mistake). This keeps the
+    candidate's name out of the job-search query."""
+    name = " ".join(str(profile.get("name") or "").split()).lower()
+    titles = []
+    for entry in profile.get("experience") or []:
+        if not isinstance(entry, dict):
+            continue
+        title = " ".join(str(entry.get("title") or "").split())
+        if not title or (name and title.lower() == name):
+            continue
+        if not entry.get("company") and not entry.get("dates"):
+            continue
+        titles.append(title)
+        if len(titles) >= limit:
+            break
+    return titles
+
+
 def build_query(profile, location="", max_keywords=5):
     """Turns an Agent 1 profile into the query dict that providers receive:
         {"keywords": [...], "title": str, "location": str, "experience_level": str}
     Keywords are the first `max_keywords` skills (no case-insensitive repeats).
-    The title is the first experience entry's title, which assumes the most
-    recent job is listed first. Missing profile fields give empty values.
+    The title is the first usable experience title (see usable_titles), which
+    assumes the most recent job is listed first, or "" if there is none.
+    Missing profile fields give empty values.
     """
     keywords, seen = [], set()
     for skill in profile.get("skills") or []:
@@ -124,8 +148,8 @@ def build_query(profile, location="", max_keywords=5):
         keywords.append(skill)
         if len(keywords) >= max_keywords:
             break
-    experience = profile.get("experience") or []
-    title = (experience[0].get("title") or "").strip() if experience else ""
+    titles = usable_titles(profile, limit=1)
+    title = titles[0] if titles else ""
     return {
         "keywords": keywords,
         "title": title,

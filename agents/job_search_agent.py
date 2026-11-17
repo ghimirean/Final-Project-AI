@@ -27,7 +27,8 @@ from typing import List, Literal, Optional
 
 from pydantic import BaseModel
 
-from job_search import JobDeduper, build_query, experience_level, search_jobs
+from job_search import (JobDeduper, build_query, experience_level, search_jobs,
+                        usable_titles)
 from llm import LLMError, ask_llm
 
 log = logging.getLogger(__name__)
@@ -70,12 +71,13 @@ class Decision(BaseModel):
 
 
 def profile_summary(profile):
-    """What the LLM gets to see. No name, email, phone or raw resume text."""
-    experience = profile.get("experience") or []
+    """What the LLM gets to see. No name, email, phone or raw resume text.
+    recent_titles skips name-like and incomplete experience entries
+    (usable_titles), so the name can't reach the search query this way."""
     projects = profile.get("projects") or []
     return {
         "skills": profile.get("skills") or [],
-        "recent_titles": [e.get("title") for e in experience[:3] if e.get("title")],
+        "recent_titles": usable_titles(profile, limit=3),
         "experience_years": profile.get("experience_years"),
         "experience_level": experience_level(profile.get("experience_years")),
         "projects": [{"name": p.get("name"), "skills": p.get("skills") or []}

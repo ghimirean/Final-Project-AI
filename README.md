@@ -2,7 +2,8 @@
 
 A multi-agent AI mock interview platform. This README covers **Agent 1
 (Resume Parser)**, **Agent 2 (Job Search)**, **Agent 3 (Job Description Synthesizer + Match Scoring)**
-the **pipeline / API**, and the **orchestrator** that runs them all and hands the chosen job to Agent 4.
+the **pipeline / API**, the **orchestrator** that runs them all and hands the chosen job to Agent 4,
+and the **HITL dashboard** (`streamlit run dashboard.py`) where the user picks that job in the browser.
 
 | Agent | Kind of AI | Model | What the model does | Fallback |
 |---|---|---|---|---|
@@ -338,6 +339,15 @@ checked inside one search and across all of Agent 2's searches.
 
 **The LLM never sees contact details or resume text**: only skills, job
 titles, years of experience and project names and skills.
+
+**Which job titles are used** (`usable_titles(profile)` in `agents/job_search.py`,
+used for the LLM's `recent_titles` and for the rule-based query's title).
+Agent 1 can return junk experience entries, for example the candidate's
+name tagged as a job title with no company and no dates. Such a title would
+put the candidate's name into the JSearch query text. So an entry is skipped
+if its title is empty, its title is the candidate's name (case-insensitive),
+or it has neither a company nor dates. With no usable title, the rule-based
+query has an empty title and searches with the skills only.
 
 **Fallback:** if the LLM fails at the first step (missing key, API down, bad
 JSON) or finishes without searching, Agent 2 runs one search with the
@@ -762,6 +772,22 @@ before Agent 4. `make_terminal_chooser()` is the terminal version: it shows
 the top 5 (score, title, company, gaps) and accepts a number, `c` for a
 custom role, or `q` / Ctrl-D to quit. Invalid input is explained and asked again.
 
+**The same run in two halves** (for a UI that can't wait inside a callback,
+like the web dashboard below). `run_intervai` simply calls both:
+```python
+from orchestrator import prepare_run, finish_run
+state = prepare_run("resume.pdf", "Remote", offline=True)   # Agents 1-3; writes ranked_jobs.json
+state["ranked_jobs"]                                         # show these, let the user choose
+result = finish_run(state, chosen)   # chosen = a ranked job, {"custom_role": "..."} or None
+```
+`finish_run` writes `interview_brief.json` (unless the user quit) and
+`run_trace.json` exactly like the terminal run, and returns the same dict as
+`run_intervai`. A state can be finished only once. The state holds the
+resume text (a custom role is scored against it), so keep it in memory only
+and drop it after `finish_run`. `prepare_run(..., on_stage=callback)` calls
+`callback("agent1" | "agent2" | "agent3")` as each stage starts, so a UI can
+show which one is running.
+
 **Demo replay** (`--demo`, `run_intervai(..., demo=True)`). Shows the same
 real jobs in every rehearsal and in the live demo, at no cost: no Groq call
 and no JSearch request is made. Every run in which Agent 2 found real jobs
@@ -849,6 +875,74 @@ the contract with Agent 4 (`brief_version` changes if the format does):
 
 ---
 
+## HITL dashboard — choose the job in the browser (`dashboard.py`)
+
+The human-in-the-loop step as a web page (Streamlit, `streamlit==1.65.0` in
+`requirements.txt`). It runs the orchestrator's own `prepare_run` and
+`finish_run`, so it writes exactly the same `output/` files as the terminal
+version. No logic is duplicated and no agent framework is used.
+
+**Run it** (from the project root, in the project's virtual environment):
+```bash
+streamlit run dashboard.py
+```
+Streamlit opens http://localhost:8501 in the browser.
+
+**How to use it**
+1. **Upload a resume** (`.pdf` or `.docx`) in the sidebar.
+2. **Location** (optional), e.g. `Monroe, LA` or `Remote`.
+3. **Mode:**
+
+   | Mode | Jobs shown | API calls |
+   |---|---|---|
+   | **Demo** (default) | The last REAL search results, replayed (`--demo`) | none |
+   | **Offline** | The 6 fake practice jobs in `tests/fixtures/jobs.json` (`--offline`) | none |
+   | **Live** | A real Groq + JSearch search now | Groq, and JSearch requests |
+
+   Live mode spends the JSearch quota (about 200 requests a month), so it
+   shows a warning and defaults to **1 search step** (at most one JSearch
+   request; up to 4 can be chosen). Use demo or offline for rehearsals.
+4. Click **Find jobs**. A status box shows each stage as it runs (Agent 1
+   reading the resume, Agent 2 finding jobs, Agent 3 ranking). This takes a
+   few seconds offline and 10–30 seconds live.
+5. The ranked jobs appear as **cards**, best match first. Each card shows the
+   score, title, company, location, matched and missing skills, key points,
+   gaps, the interview focus (what Agent 4 will ask about), a **Score
+   breakdown** toggle (skill points, text similarity, experience and degree
+   penalties) and an **Open the posting** button.
+6. **Choose:** pick a job, or **A different role** and type a job title (it
+   has no real posting, so Agent 3 scores it from the role name only and its
+   key points and gaps are thin). Then click **Confirm and prepare the
+   interview**, which writes `output/interview_brief.json` for Agent 4 and
+   `output/run_trace.json`. Or click **Quit without choosing**: the trace
+   records the quit and no brief is written.
+7. **Start over** to run another resume.
+
+**Messages:** a stage that fails shows which agent failed and why (e.g. a
+file that isn't a real PDF). Fallbacks are explained: offline or demo
+practice jobs, demo mode with no saved real jobs (do one live run first),
+the job source out of requests (HTTP 429, quota used up), a missing
+`RAPIDAPI_KEY`, a live search that found no jobs, a widened location, and
+Agent 1's or Agent 3's own fallbacks.
+
+**Safety and privacy**
+- **Untrusted job text:** titles, companies, descriptions and links come from
+  the internet. No HTML is ever rendered (`unsafe_allow_html` is never used),
+  markdown characters are escaped so a posting can't add links or formatting,
+  and a link is only clickable if it starts with `http://` or `https://`
+  (`javascript:`, `data:` and other links are not shown as links).
+- **Agents 1–3 run only when Find jobs is clicked**, never when Streamlit
+  reruns the page after another click. Their result is kept in
+  `st.session_state`.
+- **The resume is never stored:** the upload is written to a temporary file
+  for Agent 1 and deleted right after, even if an agent fails. The resume
+  text stays in memory only, and the run state and the uploaded file are
+  cleared as soon as you confirm or quit.
+- The output folder can be changed with `INTERVAI_OUTPUT_DIR` (the tests use a
+  temporary folder).
+
+---
+
 ## Tests
 
 ```bash
@@ -869,11 +963,14 @@ see the **Actions** tab on GitHub, or the ✓ / ✗ next to each commit.
 | `tests/test_parser_ner.py` | NER parser with a fake "perfect" model: same profile as rules on the 3 fixtures, skill entity linking (aliases, unknown skills dropped, text matches added), planned-work skills dropped, company recovered from "Company | Title", Python date math, model mistakes filtered (fake dates, project roles, links), loud fallback when the model is missing, broken or crashes, pipeline default; plus the real committed model (F1 ≥ 0.90 on the hand-annotated resumes) |
 | `tests/test_unseen_layouts.py` | The 3 fake resumes in unseen layouts are readable (the PDF really has two columns) and the checker's field comparison works |
 | `tests/test_orchestrator.py` | The full run with fake Agent 2 LLM/provider: stage order and trace fields, fallbacks recorded, no contact details in the trace, fixture-job fallback (no key, failed searches, no jobs, crash) with a warning, per-search records and real vs fixture job counts in the trace, the full ranking saved to `ranked_jobs.json` (best first, also offline and on quit, resume quotes scrubbed), `--demo` replay (saved jobs or newest cache entry, whichever is newer, no Groq/JSearch calls, traced as demo replay, fixture fallback with a warning, not with `--offline`), widening traced and warned, HTTP status in the error warning, no key = no Groq/JSearch calls, `--offline`; the terminal chooser (top 5 menu, number, invalid input asked again, custom role validated, quit / Ctrl-D); custom role through Agent 3; the interview brief (fields, original description, no contact details, free text scrubbed, none when the user quits) |
+| `tests/test_orchestrator_split.py` | `prepare_run` / `finish_run` (offline): ranking written but no brief or trace before the choice, a chosen job (brief + all 5 trace stages), a custom role, quit (no brief, `quit` in the trace), a run finished only once, `on_stage` order (and the failing stage reported last), `run_intervai` gives the same result as the two halves |
+| `tests/test_dashboard.py` | The HITL dashboard. Plain tests: modes (live defaults to 1 step), file types, the temp resume deleted after use and after a failure, run state cleared, markdown escaped, only http(s) links allowed, choice and custom-role validation, score breakdown, every fallback/error message. Streamlit `AppTest` (offline mode, temp output folder): start page, live-mode warning, cards rendered and the agents run once (not on reruns), confirm writes the brief and clears the run and the upload, custom role, quit, a broken PDF, a malicious job title and `javascript:` link shown as plain text |
 | `tests/test_job_synthesizer.py` | Requirement extraction, scoring, penalties, ranking (on the TF-IDF fallback), the optional LLM key points with a fake Groq: score unchanged, no contact details in the prompt, every fallback case |
 | `tests/test_keypoints.py` | Embedding key points: spaCy candidate phrases, the real KeyBERT on a fake embedding model, resume matching (by skill, by similarity, not at all), nice-to-haves (cue sentences, "Preferred" sections split at line breaks and bullets, required wins), field building, no Groq calls by default, score unchanged, fallbacks, the KeyBERT-vs-Groq matching in `scripts/compare_key_points.py` |
 | `tests/test_embeddings.py` | Chunking, best-chunk similarity, the 0–40 mapping, scores not depending on other jobs, fallback |
 | `tests/test_pipeline.py` | `run_pipeline` and the `/rank` endpoint (FastAPI `TestClient`) |
-| `tests/test_job_search_agent.py` | Agent 2 loop with a scripted fake LLM: search/finish, merging (the same posting from two searches counts once), repeat queries, step and job limits, rule-based fallback, provider errors (status in the trace, logged warning), per-search records, widening city → state → Remote (and when not to widen), prompt contains no contact details, query cleaning |
+| `tests/test_job_search_agent.py` | Agent 2 loop with a scripted fake LLM: search/finish, merging (the same posting from two searches counts once), repeat queries, step and job limits, rule-based fallback, provider errors (status in the trace, logged warning), per-search records, widening city → state → Remote (and when not to widen), prompt contains no contact details, `recent_titles` skip name-like and incomplete experience entries, query cleaning |
+| `tests/test_job_search.py` | Agent 2 toolkit: job format, cleaning, duplicates, limits, `build_query`, `usable_titles` (a name-as-title entry, `experience: []`, incomplete entries skipped, a normal entry kept) |
 | `tests/test_jsearch_provider.py` | JSearch provider with a fake HTTP call: request building, result parsing, error cases with their HTTP status, `last_request` (status, raw count, cache hits), key never in error messages; query cache in a temp folder: a hit skips the request, expired entries are refreshed, errors and empty results aren't cached, a corrupt file is ignored, `cache_path=None` turns it off |
 | `tests/test_search_endpoint.py` | `POST /search`: NER parser used, success, fallback, empty results, bad input (file type, `limit`, `max_steps`), `max_steps` default and pass-through, 502 on job source failure |
 
@@ -988,9 +1085,10 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
 - **Location:** the location you pass always wins. If every search there is
   empty, the agent widens city → state → Remote by itself (up to 2 extra
   requests), so the jobs shown can be in another city of the state, or remote.
-- **Rule-based fallback title:** it uses the first experience entry's title,
-  which can be an odd title (for example "Student Webmaster") that returns
-  nothing.
+- **Rule-based fallback title:** it uses the first usable experience title
+  (name-like and incomplete entries are skipped), which can still be an odd
+  title (for example "Student Webmaster") that returns nothing. A real job
+  listed with neither a company nor dates is skipped too.
 - **Search quality varies:** the LLM can pick poor queries. Temperature 0 and
   a fixed seed make runs repeat most of the time, but Groq doesn't promise
   it; use `--demo` when the jobs must be the same. Job titles and companies shown to the LLM are data
@@ -1065,3 +1163,17 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
   degrees and years ("+3 more" can be a years gap).
 - **Output files are overwritten by every run** (`run_trace.json`,
   `ranked_jobs.json`, `interview_brief.json`); copy them to keep a run.
+
+**HITL dashboard**
+- **Local and single-user:** no login, and every run writes the same
+  `output/` files, so two people using it at once overwrite each other's
+  brief. It is meant for a laptop demo, not a public server.
+- **The resume stays in server memory until you confirm or quit.** If the
+  browser tab is closed before that, Streamlit drops the session only when
+  it times out; the temporary file itself is always deleted right away.
+- **Live mode isn't covered by the tests:** they run offline only, so no
+  JSearch or Groq request is spent; live mode uses the same orchestrator path
+  as the terminal `--location` run.
+- **Cards show the whole ranking** (6 jobs offline, up to 20 live), not only
+  the top 5 like the terminal menu. The full job description isn't shown,
+  only its key points; use **Open the posting** for the rest.

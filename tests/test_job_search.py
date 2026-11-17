@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(ROOT, "agents"))
 
 from job_search import (  # noqa: E402
     JOB_FIELDS, JobProvider, build_query, experience_level,
-    normalize_job, search_jobs,
+    normalize_job, search_jobs, usable_titles,
 )
 from pipeline import JOB_FIELDS as PIPELINE_JOB_FIELDS  # noqa: E402
 from pipeline import run_pipeline, validate_jobs  # noqa: E402
@@ -151,8 +151,58 @@ def test_query_location_is_passed_through_stripped():
 
 
 def test_query_title_comes_from_first_experience_entry():
-    profile = {"experience": [{"title": "Data Analyst"}, {"title": "Intern"}]}
+    profile = {"experience": [{"company": "Acme", "title": "Data Analyst"},
+                              {"company": "Beta", "title": "Intern"}]}
     assert build_query(profile)["title"] == "Data Analyst"
+
+
+# ---------- usable_titles: junk experience entries from the NER parser ----------
+
+NORMAL = {"company": "Acme", "title": "Data Analyst", "dates": "Jan 2022 - Dec 2023"}
+JUNK_PROFILE = {
+    "name": "Jordan Example",                  # fake name
+    "skills": ["Python", "SQL", "Excel"],
+    "experience": [{"company": None, "title": "Jordan Example", "dates": None}],
+}
+
+
+def test_junk_name_entry_gives_no_title_and_skill_keywords():
+    query = build_query(JUNK_PROFILE)
+    assert query["title"] == ""
+    assert query["keywords"] == ["Python", "SQL", "Excel"]
+    assert "jordan" not in str(query).lower()          # the name never reaches the query
+
+
+def test_empty_experience_gives_no_title():
+    assert build_query({"name": "Jordan Example", "experience": []})["title"] == ""
+    assert usable_titles({"experience": []}) == []
+
+
+def test_title_equal_to_the_name_is_skipped_case_insensitively():
+    profile = {"name": "Jordan Example",
+               "experience": [{"company": "Acme", "title": "JORDAN  example", "dates": "2023"},
+                              NORMAL]}
+    assert usable_titles(profile) == ["Data Analyst"]
+    assert build_query(profile)["title"] == "Data Analyst"
+
+
+def test_incomplete_entries_are_skipped():
+    profile = {"experience": [{"title": "Webmaster"},                       # no company, no dates
+                              {"title": "", "company": "Acme", "dates": "2022"},
+                              {"title": "Tutor", "dates": "2021"},         # dates only: kept
+                              {"title": "Cashier", "company": "Shop"}]}    # company only: kept
+    assert usable_titles(profile) == ["Tutor", "Cashier"]
+
+
+def test_a_normal_entry_is_still_used():
+    profile = {"name": "Jordan Example", "experience": [NORMAL]}
+    assert usable_titles(profile) == ["Data Analyst"]
+    assert build_query(profile)["title"] == "Data Analyst"
+
+
+def test_usable_titles_respects_the_limit():
+    profile = {"experience": [dict(NORMAL, title=f"Analyst {i}") for i in range(5)]}
+    assert usable_titles(profile, limit=3) == ["Analyst 0", "Analyst 1", "Analyst 2"]
 
 
 def test_query_from_real_parsed_profile():
