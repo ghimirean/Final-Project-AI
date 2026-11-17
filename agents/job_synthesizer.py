@@ -534,9 +534,10 @@ def nice_to_have_skills(description, skills):
 
 
 # Words that start a degree / field-of-study clause: "Bachelor's degree in X",
-# "students studying X", "majoring in X"
+# "students studying X", "majoring in X", "major in X". "major" alone is not
+# one: "includes major systems like Cleveland Clinic" made customer names gaps.
 DEGREE_CLAUSE = (r"\b(?:degree|bachelor'?s?|master'?s?|ph\.?d|doctorate|associate'?s?"
-                 r"|studying|majoring|major)\b")
+                 r"|studying|majoring|major(?=\s+in\b|\s*:))\b")
 
 
 def sentence_with(phrase, text):
@@ -655,8 +656,15 @@ def embedding_assessment(job, breakdown, req, matches, skill_list=None, profile=
             rest = re.sub(re.escape(s), " ", rest, flags=re.IGNORECASE)
         return not content_words(rest)
 
+    def company_name(phrase):
+        # "CVS Health" at CVS Health, "Centil" at Centil: says nothing about the job
+        words = " ".join(re.findall(r"[a-z0-9]+", phrase.lower()))
+        company = " ".join(re.findall(r"[a-z0-9]+", (job.get("company") or "").lower()))
+        return bool(words and company) and f" {words} " in f" {company} "
+
     # NO DUPLICATES: each skill is in only one of key_points, nice_to_have, gaps
-    matches = [m for m in checked if not only_listed_skills(m["phrase"])][:KEY_POINTS]
+    matches = [m for m in checked
+               if not only_listed_skills(m["phrase"]) and not company_name(m["phrase"])][:KEY_POINTS]
 
     # Gaps beyond the skill list. Role phrases are never gaps; skill phrases
     # aren't either (their missing skills are already in gaps / nice_to_have);
