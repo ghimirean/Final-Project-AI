@@ -19,6 +19,7 @@ Modes:
              about 200 a month), so it defaults to 1 search step
 """
 import os
+import re
 import sys
 import tempfile
 
@@ -81,7 +82,94 @@ def run_agents(filename, data, location, mode, max_steps=LIVE_DEFAULT_STEPS,
         os.remove(path)
 
 
+# Job titles, companies, descriptions and links come from the internet, so
+# they are untrusted: no HTML is ever rendered (never unsafe_allow_html), and
+# markdown characters are escaped so a posting can't add links or formatting.
+MARKDOWN_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+\-.!|<>~$:=&\"'^])")
+
+
+def md(text, limit=300):
+    """Untrusted text -> safe for st.markdown: one line, at most `limit`
+    characters, every markdown character escaped."""
+    text = " ".join(str(text if text is not None else "").split())
+    if len(text) > limit:
+        text = text[:limit - 1].rstrip() + "…"
+    return MARKDOWN_SPECIAL.sub(r"\\\1", text)
+
+
+def safe_url(url):
+    """The link if it is a plain http:// or https:// URL, else None
+    (javascript:, data:, relative links, ... are never made clickable)."""
+    if not isinstance(url, str):
+        return None
+    url = url.strip()
+    if not url.lower().startswith(("http://", "https://")) or len(url) > 2000:
+        return None
+    if any(ch.isspace() or ord(ch) < 32 for ch in url):
+        return None
+    return url
+
+
+def bullets(items, empty="none"):
+    """Untrusted list -> a safe markdown bullet list."""
+    items = [md(x) for x in items or [] if str(x).strip()]
+    return "\n".join(f"- {x}" for x in items) if items else f"_{empty}_"
+
+
+def breakdown_rows(breakdown):
+    """Agent 3's score breakdown as (part, points, detail) rows."""
+    b = breakdown or {}
+    years = (f"needs {b.get('required_years', 0)} years, resume shows "
+             f"{b.get('candidate_years', 0)}")
+    degree = (f"needs {b.get('required_degree') or 'no degree'}, resume shows "
+              f"{b.get('candidate_degree') or 'none'}")
+    return [
+        ("Skill overlap", b.get("skill_points", 0), "up to 60"),
+        ("Text similarity", b.get("text_points", 0),
+         f"up to 40 ({b.get('text_method', '?')}, similarity {b.get('text_similarity', 0)})"),
+        ("Experience gap", -abs(b.get("experience_penalty", 0) or 0), years),
+        ("Degree gap", -abs(b.get("degree_penalty", 0) or 0), degree),
+    ]
+
+
 # ---------- the page ----------
+
+def job_card(rank, job):
+    """One ranked job: score, title, company, skills, key points, gaps,
+    interview focus, score breakdown and (if safe) the link."""
+    a = job.get("assessment") or {}
+    with st.container(border=True):
+        st.markdown(f"#### {rank}. {md(job.get('title'))}")
+        where = " · ".join(md(x) for x in (job.get("company") or "unknown company",
+                                           job.get("location") or "location not given"))
+        st.markdown(f"**Score {float(job.get('score') or 0):.1f} / 100** · {where}")
+        left, right = st.columns(2)
+        with left:
+            st.markdown("**Matched skills**")
+            st.markdown(bullets(job.get("matched_skills")))
+            st.markdown("**Key points (what the employer wants)**")
+            st.markdown(bullets(a.get("key_points")))
+        with right:
+            st.markdown("**Missing skills**")
+            st.markdown(bullets(job.get("missing_skills")))
+            st.markdown("**Gaps**")
+            st.markdown(bullets(a.get("gaps")))
+        st.markdown("**Interview focus (what Agent 4 will ask about)**")
+        st.markdown(bullets(a.get("interview_focus")))
+        with st.expander("Score breakdown"):
+            st.table([{"Part": p, "Points": round(float(v or 0), 1), "Detail": d}
+                      for p, v, d in breakdown_rows(job.get("breakdown"))])
+        url = safe_url(job.get("url"))
+        if url:
+            st.link_button("Open the posting", url)
+        else:
+            st.caption("No safe link for this posting.")
+
+
+def job_cards(ranked):
+    st.subheader(f"{len(ranked)} ranked jobs, best match first")
+    for i, job in enumerate(ranked, 1):
+        job_card(i, job)
 
 def sidebar():
     """The inputs. Returns (uploaded file, location, mode, max_steps, pressed)."""
@@ -116,7 +204,8 @@ def main():
     if state is None:
         st.info("Upload a resume, choose a mode and click **Find jobs**.")
         return
-    st.write(f"Jobs from: {state['jobs_source']} | ranked: {len(state['ranked_jobs'])}")
+    st.caption(f"Jobs from: {md(state['jobs_source'])}")
+    job_cards(state["ranked_jobs"])
 
 
 if __name__ == "__main__":
