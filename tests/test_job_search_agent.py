@@ -8,6 +8,8 @@ Run from project root:  python -m pytest -v
 import os
 import sys
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "agents"))
@@ -201,3 +203,118 @@ def test_clean_query_fixes_bad_llm_values():
     assert q["title"] == "Analyst"
     assert q["experience_level"] == "mid"
     assert q["location"] == "Remote"
+
+# ---------- per-search records, errors with status, widening ----------
+
+class RecordingProvider(JobProvider):
+    """Like JSearchProvider: sets last_request. `results` maps a location
+    to its raw jobs (missing = 0 jobs); `error` makes every search fail."""
+    name = "fake"
+
+    def __init__(self, results=None, error=None):
+        self.results, self.error, self.locations = results or {}, error, []
+        self.last_request = None
+
+    def search(self, query, limit):
+        loc = query.get("location", "")
+        self.locations.append(loc)
+        self.last_request = {"query_text": f"{query['title']} in {loc}", "http_status": 200,
+                             "raw_count": None, "from_cache": False}
+        if self.error:
+            self.last_request["http_status"] = getattr(self.error, "status", None)
+            raise self.error
+        jobs = self.results.get(loc, [])
+        self.last_request["raw_count"] = len(jobs)
+        return jobs
+
+
+def test_each_search_step_records_query_status_and_count(monkeypatch):
+    script(monkeypatch, search(["SQL"]), FINISH)
+    provider = RecordingProvider({"Remote": [raw_job(1), raw_job(2)]})
+    result = agent.run_job_agent(PROFILE, provider, location="Remote")
+    record = result["trace"][0]["search"]
+    assert record == {"query_text": "Data Analyst in Remote", "location": "Remote",
+                      "http_status": 200, "raw_count": 2, "returned": 2, "from_cache": False}
+
+
+def test_provider_error_is_recorded_with_status_and_logged(monkeypatch, caplog):
+    from jsearch_provider import ProviderError
+    script(monkeypatch, search(["SQL"]), FINISH)
+    error = ProviderError("JSearch rate limit or monthly quota reached (HTTP 429)", 429)
+    provider = RecordingProvider(error=error)
+    with caplog.at_level("WARNING"):
+        result = agent.run_job_agent(PROFILE, provider, location="Monroe, LA")
+    step = result["trace"][0]
+    assert step["search"]["http_status"] == 429 and "429" in step["search"]["error"]
+    assert "429" in step["search_error"]
+    assert "Agent 2 search failed" in caplog.text and "429" in caplog.text
+    assert provider.locations == ["Monroe, LA"]            # no widening after an error
+
+
+@pytest.mark.parametrize("location, wider", [
+    ("Monroe, LA", ["Louisiana", "Remote"]),
+    ("Chicago, IL", ["Illinois", "Remote"]),
+    ("Baton Rouge, Louisiana", ["Louisiana", "Remote"]),
+    ("Chicago", ["Remote"]),
+    ("Toronto, ON", ["Remote"]),
+    ("Remote", []),
+    ("remote (US)", []),
+    ("", []),
+])
+def test_wider_locations(location, wider):
+    assert agent.wider_locations(location) == wider
+
+
+def test_empty_city_widens_to_state_and_stops_there(monkeypatch):
+    script(monkeypatch, search(["Java", "OOP"], title="Software Engineer"), FINISH)
+    provider = RecordingProvider({"Louisiana": [raw_job(1)]})
+    result = agent.run_job_agent(PROFILE, provider, location="Monroe, LA")
+    assert provider.locations == ["Monroe, LA", "Louisiana"]   # Remote not needed
+    widen = [s for s in result["trace"] if s["step"] == "widen"]
+    assert len(widen) == 1
+    assert widen[0]["widened_from"] == "Monroe, LA" and widen[0]["widened_to"] == "Louisiana"
+    assert widen[0]["query"]["keywords"] == [] and widen[0]["query"]["title"] == "Software Engineer"
+    assert widen[0]["search"]["raw_count"] == 1
+    assert [j["id"] for j in result["jobs"]] == ["fake-1"] and result["mode"] == "llm"
+
+
+def test_empty_state_widens_to_remote(monkeypatch):
+    script(monkeypatch, search(["SQL"]), FINISH)
+    provider = RecordingProvider({"Remote": [raw_job(1)]})
+    result = agent.run_job_agent(PROFILE, provider, location="Monroe, LA")
+    assert provider.locations == ["Monroe, LA", "Louisiana", "Remote"]
+    widen = [s for s in result["trace"] if s["step"] == "widen"]
+    assert [(w["widened_from"], w["widened_to"]) for w in widen] == [
+        ("Monroe, LA", "Louisiana"), ("Louisiana", "Remote")]
+    assert len(result["jobs"]) == 1
+
+
+def test_no_widening_when_jobs_found_or_turned_off_or_already_remote(monkeypatch):
+    script(monkeypatch, search(["SQL"]), FINISH)
+    provider = RecordingProvider({"Monroe, LA": [raw_job(1)]})
+    agent.run_job_agent(PROFILE, provider, location="Monroe, LA")
+    assert provider.locations == ["Monroe, LA"]
+
+    script(monkeypatch, search(["SQL"]), FINISH)
+    provider = RecordingProvider()
+    agent.run_job_agent(PROFILE, provider, location="Monroe, LA", widen=False)
+    assert provider.locations == ["Monroe, LA"]
+
+    script(monkeypatch, search(["SQL"]), FINISH)
+    provider = RecordingProvider()
+    result = agent.run_job_agent(PROFILE, provider, location="Remote")
+    assert provider.locations == ["Remote"] and result["jobs"] == []
+
+
+def test_rule_fallback_also_widens(monkeypatch):
+    script(monkeypatch, LLMError("groq down"))
+    provider = RecordingProvider({"Louisiana": [raw_job(1)]})
+    result = agent.run_job_agent(PROFILE, provider, location="Monroe, LA")
+    assert result["mode"] == "rules" and provider.locations == ["Monroe, LA", "Louisiana"]
+    assert result["trace"][-1]["step"] == "widen" and len(result["jobs"]) == 1
+
+
+def test_empty_search_tells_the_llm_to_shorten_the_query(monkeypatch):
+    prompts = script(monkeypatch, search(["SQL"]), FINISH)
+    agent.run_job_agent(PROFILE, RecordingProvider(), location="Remote")
+    assert "try the job title alone" in prompts[1]

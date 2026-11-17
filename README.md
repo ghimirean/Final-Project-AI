@@ -326,6 +326,25 @@ JSON) or finishes without searching, Agent 2 runs one search with the
 rule-based `build_query(profile)`. The result's `mode` is `"llm"` or
 `"rules"`, so you can tell which path ran.
 
+**Search records and errors.** Every step that searched has a `"search"`
+record in the trace: `query_text`, `location`, `http_status`, `raw_count`,
+`returned` (after cleaning), `from_cache`, and `error` if it failed. A failed
+search (401/403 key, 429 quota, 500, network) is logged as a WARNING with its
+status code and recorded as `search_error`; it is never reported as "no jobs".
+
+**Widening.** A small city often has no postings for a title + skills query
+(on Nov 16, `Software Engineer Java OOP in Monroe, LA` returned HTTP 200 with
+0 jobs). If every search comes back empty without an error, Agent 2 widens
+the area by itself: city → state → Remote (`Monroe, LA` → `Louisiana` →
+`Remote`; the state is spelled out because "LA" also means Los Angeles),
+searching the job title only, and stops at the first area with jobs. Each
+widening is a `{"step": "widen", "widened_from", "widened_to", ...}` trace
+entry. That is at most 2 extra requests on top of `max_steps`;
+`run_job_agent(..., widen=False)` turns it off. There is no widening after an
+error (a bad key or a used-up quota would only fail again) or when the
+location is already Remote. After an empty search the LLM is also told to try
+the job title alone.
+
 ### Job source: JSearch
 
 `JSearchProvider` sends one request per search to JSearch's `/search-v2`
@@ -791,7 +810,7 @@ see the **Actions** tab on GitHub, or the ✓ / ✗ next to each commit.
 | `tests/test_keypoints.py` | Embedding key points: spaCy candidate phrases, the real KeyBERT on a fake embedding model, resume matching (by skill, by similarity, not at all), nice-to-haves, field building, no Groq calls by default, score unchanged, fallbacks, the KeyBERT-vs-Groq matching in `scripts/compare_key_points.py` |
 | `tests/test_embeddings.py` | Chunking, best-chunk similarity, the 0–40 mapping, scores not depending on other jobs, fallback |
 | `tests/test_pipeline.py` | `run_pipeline` and the `/rank` endpoint (FastAPI `TestClient`) |
-| `tests/test_job_search_agent.py` | Agent 2 loop with a scripted fake LLM: search/finish, merging, repeat queries, step and job limits, rule-based fallback, provider errors, prompt contains no contact details, query cleaning |
+| `tests/test_job_search_agent.py` | Agent 2 loop with a scripted fake LLM: search/finish, merging, repeat queries, step and job limits, rule-based fallback, provider errors (status in the trace, logged warning), per-search records, widening city → state → Remote (and when not to widen), prompt contains no contact details, query cleaning |
 | `tests/test_jsearch_provider.py` | JSearch provider with a fake HTTP call: request building, result parsing, error cases with their HTTP status, `last_request` (status, raw count, cache hits), key never in error messages; query cache in a temp folder: a hit skips the request, expired entries are refreshed, errors and empty results aren't cached, a corrupt file is ignored, `cache_path=None` turns it off |
 | `tests/test_search_endpoint.py` | `POST /search`: NER parser used, success, fallback, empty results, bad input (file type, `limit`, `max_steps`), `max_steps` default and pass-through, 502 on job source failure |
 
