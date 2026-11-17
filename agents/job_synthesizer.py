@@ -93,9 +93,18 @@ DEGREE_LEVELS = [
 ]
 
 
+# Like YEARS_PATTERN, but a range counts by its LOWER number:
+# "10-14 years" -> 10, "3 to 7+ years" -> 3, "1 to 3 years" -> 1
+MIN_YEARS_PATTERN = r"(\d+)(?:\s*(?:-|–|to)\s*\d+)?\s*\+?\s*(?:or more\s+)?years?\b"
+# No posting asks for more; bigger numbers are company history
+# ("innovating fearlessly for 40 years", "over 100 years of service")
+MAX_REQUIRED_YEARS = 20
+
+
 def extract_min_years(text):
-    # Takes the largest number found, e.g. "5+ years" -> 5. None found -> 0.
-    numbers = [int(n) for n in re.findall(YEARS_PATTERN, text, re.IGNORECASE)]
+    # Takes the largest requirement found, e.g. "5+ years" -> 5. None found -> 0.
+    numbers = [int(n) for n in re.findall(MIN_YEARS_PATTERN, text, re.IGNORECASE)]
+    numbers = [n for n in numbers if n <= MAX_REQUIRED_YEARS]
     return max(numbers) if numbers else 0
 
 
@@ -525,9 +534,10 @@ def nice_to_have_skills(description, skills):
 
 
 # Words that start a degree / field-of-study clause: "Bachelor's degree in X",
-# "students studying X", "majoring in X"
+# "students studying X", "majoring in X", "major in X". "major" alone is not
+# one: "includes major systems like Cleveland Clinic" made customer names gaps.
 DEGREE_CLAUSE = (r"\b(?:degree|bachelor'?s?|master'?s?|ph\.?d|doctorate|associate'?s?"
-                 r"|studying|majoring|major)\b")
+                 r"|studying|majoring|major(?=\s+in\b|\s*:))\b")
 
 
 def sentence_with(phrase, text):
@@ -646,8 +656,15 @@ def embedding_assessment(job, breakdown, req, matches, skill_list=None, profile=
             rest = re.sub(re.escape(s), " ", rest, flags=re.IGNORECASE)
         return not content_words(rest)
 
+    def company_name(phrase):
+        # "CVS Health" at CVS Health, "Centil" at Centil: says nothing about the job
+        words = " ".join(re.findall(r"[a-z0-9]+", phrase.lower()))
+        company = " ".join(re.findall(r"[a-z0-9]+", (job.get("company") or "").lower()))
+        return bool(words and company) and f" {words} " in f" {company} "
+
     # NO DUPLICATES: each skill is in only one of key_points, nice_to_have, gaps
-    matches = [m for m in checked if not only_listed_skills(m["phrase"])][:KEY_POINTS]
+    matches = [m for m in checked
+               if not only_listed_skills(m["phrase"]) and not company_name(m["phrase"])][:KEY_POINTS]
 
     # Gaps beyond the skill list. Role phrases are never gaps; skill phrases
     # aren't either (their missing skills are already in gaps / nice_to_have);

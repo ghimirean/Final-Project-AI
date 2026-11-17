@@ -184,6 +184,35 @@ def test_experience_and_role_use_the_evidence_rules():
 
 # ---------- the assessment built from the matches ----------
 
+@pytest.mark.parametrize("sentence, phrase, kind", [
+    # "major" in "major systems" is not a degree clause (a real Epic posting)
+    ("Our community includes major systems like Cleveland Clinic and Kaiser Permanente.",
+     "Cleveland Clinic", "role"),
+    ("Students who major in Computer Science are welcome.", "Computer Science", "degree"),
+    ("Major: Computer Science or a related field.", "Computer Science", "degree"),
+])
+def test_major_is_a_degree_word_only_as_major_in(sentence, phrase, kind):
+    assert phrase_kind(phrase, sentence, load_skills(SKILLS_PATH)) == kind
+
+
+def test_key_phrases_never_cross_a_line_break():
+    text = ("Position Summary\n\nThe Delivery Engineer works with customers.\n"
+            "Key deliverables\n• Mentors administrators on the platform.")
+    shown = set(candidate_phrases(text).values())
+    assert not any("\n" in p for p in shown)
+    assert "Delivery Engineer" in shown
+
+
+def test_company_name_is_not_a_key_point():
+    job = {"id": "fake-co", "title": "Developer", "company": "Fakeco Health",
+           "description": "Fakeco Health builds internal tools in Java."}
+    b = score_match(STUDENT, job)["breakdown"]
+    matches = [match("Fakeco Health"), match("Fakeco"), match("internal tools"),
+               match("Fakeco customers")]
+    a = embedding_assessment(job, b, extract_requirements(job), matches, profile=STUDENT)
+    assert a["key_points"] == ["internal tools", "Fakeco customers"]    # more than the name: kept
+
+
 def test_nice_to_have_from_plus_bonus_preferred():
     assert nice_to_have_skills(JOBS["job-001"]["description"], ["Java", "C++", "Git"]) == ["C++"]
     assert nice_to_have_skills(JOBS["job-002"]["description"], ["C++", "Git", "GitHub"]) == ["Git", "GitHub"]

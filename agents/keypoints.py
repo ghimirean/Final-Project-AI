@@ -109,7 +109,14 @@ def candidate_phrases(text):
     stop = _stop_words()
     phrases = {}
     for chunk in nlp(text).noun_chunks:
-        tokens = [t for t in chunk if re.fullmatch(TOKEN, t.text)
+        # a phrase never crosses a line break: postings put headings and
+        # bullets on their own lines ("Position Summary\n\nThe Delivery
+        # Engineer" -> "Delivery Engineer")
+        start = chunk.start
+        for t in chunk:
+            if t.i > chunk.start and "\n" in text[t.doc[t.i - 1].idx:t.idx]:
+                start = t.i
+        tokens = [t for t in chunk if t.i >= start and re.fullmatch(TOKEN, t.text)
                   and t.lower_ not in stop and t.pos_ not in ("DET", "PRON", "NUM")]
         while tokens and tokens[0].lower_ in FILLER:
             tokens = tokens[1:]

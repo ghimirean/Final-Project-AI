@@ -103,6 +103,18 @@ def test_years_and_degree_helpers():
     assert extract_degree("Bachelor's or Master's degree") == "Bachelor"
 
 
+@pytest.mark.parametrize("text, years", [
+    ("10-14 years with network applications", 10),           # a range counts by its lower end
+    ("3 to 7+ years of related experience", 3),
+    ("1 to 3 years of experience in software engineering", 1),
+    ("We've been innovating fearlessly for 40 years. 5+ years of C++ experience.", 5),
+    ("Serving customers for over 100 years.", 0),             # company history, not a requirement
+    ("Bachelor's with 5+ years, or a Master's with 4+ years of experience", 5),
+])
+def test_min_years_from_real_posting_wording(text, years):
+    assert extract_min_years(text) == years
+
+
 # ---------- Step B: match score ----------
 
 def test_score_is_between_0_and_100():
