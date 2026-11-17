@@ -127,7 +127,8 @@ def extract_requirements(job, skill_list=None):
 # WEIGHTS (total = 100 points)
 # - Skills (60 pts): the most direct signal. Recruiters screen by "do you
 #   have the listed skills", so the share of required skills you have
-#   counts the most.
+#   counts the most. The share is weighted: a required skill counts 1.0 and
+#   a preferred (nice-to-have) skill 0.5 (see SKILL_WEIGHTS below).
 # - Text similarity (40 pts): catches overlap the skill list misses
 #   (job titles, field of study, words like "backend" or "data"). It is
 #   noisier than an exact skill match, so it gets less weight. It comes
@@ -143,6 +144,15 @@ TEXT_WEIGHT = 40
 PENALTY_PER_YEAR = 10
 MAX_PENALTY = 30
 DEGREE_PENALTY = 5
+
+# SKILL WEIGHTS in the skill share. A posting's "Preferred" or "a plus" skills
+# are not a must, so missing one should cost less than missing a required
+# skill, but having one still shows a better fit, so it is not ignored.
+# Half weight does both. Example (Goldbelt, Java + JavaScript required, Linux
+# preferred, candidate has Java): (1.0) / (1.0 + 1.0 + 0.5) = 0.4 -> 24 of 60
+# points, instead of 1/3 -> 20 when Linux counted as fully required.
+REQUIRED_SKILL_WEIGHT = 1.0
+PREFERRED_SKILL_WEIGHT = 0.5
 
 # EMBEDDING SIMILARITY -> TEXT POINTS
 # Embedding similarity is an absolute number: it depends only on the resume
@@ -255,8 +265,13 @@ def score_match(profile, job, skill_list=None, text_score=None):
     from_profile = {s.lower() for s in profile.get("skills", [])}
     matched = [s for s in req["skills"] if s.lower() in have]
     missing = [s for s in req["skills"] if s.lower() not in have]
+    preferred = nice_to_have_skills(job["description"], req["skills"])
 
-    skill_ratio = len(matched) / len(req["skills"]) if req["skills"] else 0.0
+    def weight(skill):
+        return PREFERRED_SKILL_WEIGHT if skill in preferred else REQUIRED_SKILL_WEIGHT
+
+    total_weight = sum(weight(s) for s in req["skills"])
+    skill_ratio = sum(weight(s) for s in matched) / total_weight if total_weight else 0.0
     if text_score is None:
         text_score = text_scores(profile, [job])[0]
 
@@ -280,6 +295,8 @@ def score_match(profile, job, skill_list=None, text_score=None):
             # (coursework, projects, ...), not in Agent 1's skill list
             "matched_from_text": [s for s in matched if s.lower() not in from_profile],
             "missing_skills": missing,
+            # these counted half in skill_points (PREFERRED_SKILL_WEIGHT)
+            "preferred_skills": preferred,
             "skill_points": round(skill_points, 1),
             "text_similarity": round(text_score["similarity"], 3),
             "text_points": round(text_points, 1),
@@ -451,13 +468,60 @@ NICE_TO_HAVE_CUES = r"\b(?:plus|bonus|preferred|nice to have|nice-to-have|desire
 MAX_FOCUS = 5
 
 
+# A line that starts with a bullet: "• x", "- x", "* x", "1. x", "2) x"
+BULLET = r"^\s*(?:[•●▪◦‣∙·*-]|\d+[.)])\s+"
+# Words that make a short line without a full stop a section heading
+HEADING_WORDS = (r"\b(?:qualifications?|requirements?|responsibilities|duties|benefits|skills"
+                 r"|education|experience|overview|summary|about|perks|compensation)\b")
+PROSE_WORDS = 12        # a non-bullet line longer than this is a paragraph, not a list item
+
+
+def description_parts(description):
+    """Splits a posting into (text, is_bullet) pieces: one per line, and one
+    per bullet when several bullets were flattened onto one line
+    ("Preferred: • Docker • Linux"). Postings write lists without full stops,
+    so splitting at .!? alone glued whole sections into one "sentence"."""
+    for line in description.splitlines():
+        line_is_bullet = bool(re.match(BULLET, line))
+        for i, piece in enumerate(re.split(r"\s*•\s*", line)):
+            piece = re.sub(BULLET, "", piece).strip()
+            if piece:
+                yield piece, (i > 0 or line_is_bullet)
+
+
+def is_heading(text, is_bullet):
+    """'Preferred Qualifications:', 'Requirements', 'Nice to have' ...: a short
+    non-bullet line that ends with ':' or names a section."""
+    if is_bullet:
+        return False
+    words = len(text.split())
+    if text.endswith(":"):
+        return words <= 8
+    return (words <= 4 and not re.search(r"[.!?]$", text)
+            and bool(re.search(HEADING_WORDS + "|" + NICE_TO_HAVE_CUES, text, re.IGNORECASE)))
+
+
 def nice_to_have_skills(description, skills):
-    """The posting's skills that appear in a 'plus / bonus / preferred' sentence."""
-    nice = []
-    for sentence in re.split(r"(?<=[.!?])\s+", description):
-        if re.search(NICE_TO_HAVE_CUES, sentence, re.IGNORECASE):
-            nice += [s for s in extract_skills(sentence, skills) if s not in nice]
-    return nice
+    """The posting's skills that are a 'plus / bonus / preferred'.
+    A skill counts if its own sentence has the cue ("Docker is a plus."), or if
+    it is under a heading with the cue ("Preferred Qualifications:" followed by
+    bullet lines). The next heading, or a paragraph of prose, ends that section,
+    so a "Preferred" heading never marks the "Minimum Qualifications" above it.
+    A skill the posting also asks for outside a preferred part is required
+    (Java under "Minimum" and "Java-based Web Services" under "Preferred")."""
+    nice, required, in_nice_section = [], set(), False
+    for text, is_bullet in description_parts(description):
+        if is_heading(text, is_bullet):
+            in_nice_section = bool(re.search(NICE_TO_HAVE_CUES, text, re.IGNORECASE))
+        elif not is_bullet and len(text.split()) > PROSE_WORDS:
+            in_nice_section = False
+        for sentence in re.split(r"(?<=[.!?])\s+", text):
+            found = extract_skills(sentence, skills)
+            if in_nice_section or re.search(NICE_TO_HAVE_CUES, sentence, re.IGNORECASE):
+                nice += [s for s in found if s not in nice]
+            else:
+                required.update(found)
+    return [s for s in nice if s not in required]
 
 
 # Words that start a degree / field-of-study clause: "Bachelor's degree in X",

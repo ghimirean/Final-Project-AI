@@ -190,6 +190,56 @@ def test_nice_to_have_from_plus_bonus_preferred():
     assert nice_to_have_skills(JOBS["job-003"]["description"], ["Python", "Tableau"]) == ["Tableau"]
 
 
+# A FAKE posting shaped like real JSearch ones: bullet lists, no full stops
+BULLET_POSTING = (
+    "Overview\n"
+    "We build web tools for small clinics and need a developer to help our team grow fast\n"
+    "Minimum Qualifications:\n"
+    "• Bachelor's degree or equivalent experience\n"
+    "• Working experience with Java, JavaScript\n"
+    "Preferred Qualifications:\n"
+    "• Java-based Web Services\n"
+    "• Unix/Linux Operating System\n"
+    "\n"
+    "At Fakeco, we value and reward our team's dedication and hard work with good benefits"
+)
+
+
+def test_preferred_heading_marks_only_its_own_section():
+    skills = ["Java", "JavaScript", "Linux"]
+    assert nice_to_have_skills(BULLET_POSTING, skills) == ["Linux"]
+
+
+def test_preferred_section_shows_in_the_assessment():
+    job = {"id": "fake-bullets", "title": "Software Developer", "company": "Fakeco",
+           "description": BULLET_POSTING}
+    b = score_match(STUDENT, job)["breakdown"]
+    a = embedding_assessment(job, b, extract_requirements(job), [], profile=STUDENT)
+    assert a["nice_to_have"] == ["Linux"]
+    assert "JavaScript" in a["gaps"] and "Linux" not in a["gaps"]
+    assert "Java" in a["required_skills"] and "JavaScript" in a["required_skills"]
+
+
+@pytest.mark.parametrize("text, nice", [
+    # bullets flattened onto one line under a heading
+    ("Requirements:\n• Java • SQL\nPreferred:\n• Docker • Linux", ["Docker", "Linux"]),
+    # a skill also asked for outside the preferred part is required
+    ("Requirements:\n- Java\nPreferred:\n- Java web services\n- Docker", ["Docker"]),
+    # the cue inside a normal sentence still works, on its own line only
+    ("You must know Java.\nDocker is a plus.\nLinux daily.", ["Docker"]),
+    ("- Python required\n- Docker experience preferred\n- Linux", ["Docker"]),
+    # a short heading without a colon
+    ("Nice to have\n- Docker\n- Linux\nResponsibilities\n- Write Java", ["Docker", "Linux"]),
+    # a paragraph of prose ends the preferred section
+    ("Preferred:\n- Docker\nOur team uses Java and Linux every day to ship software for our customers",
+     ["Docker"]),
+    # "preferably" (about a degree) is not a cue
+    ("Bachelor's degree (preferably in Computer Science)\n- Java", []),
+])
+def test_nice_to_have_follows_lines_and_bullets(text, nice):
+    assert nice_to_have_skills(text, ["Java", "SQL", "Python", "Docker", "Linux"]) == nice
+
+
 def match(phrase, best_line=None, similarity=0.2):
     # what keypoints.match_phrases returns for one phrase
     return {"phrase": phrase, "relevance": 0.5, "resume_similarity": similarity,

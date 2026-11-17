@@ -254,6 +254,8 @@ skills, education, jobs, years, projects) each pair agrees on. Our run:
 best matches score **90.0 and 75.4** instead of **100.0 and 84.0**, because
 NER doesn't count "Algorithms", which appears only as a course name. The
 order of all six jobs is the same.
+(Measured before preferred skills counted half; with that weighting the
+current scores for sample.pdf are 100.0 and 82.5, same order.)
 
 Earlier, Gemini and the rules agreed on everything except Excel/Word, with
 the same projects on all four resumes (only summaries differ, because Gemini
@@ -530,7 +532,7 @@ or `"llm"` when the optional Groq key points are on.)
 |---|---|
 | `key_points` | the KeyBERT phrases, most relevant first. A phrase that is nothing but skills already listed in `nice_to_have` or `gaps` ("GitHub", "Linux") is dropped, so **each skill appears in only one of key_points / nice_to_have / gaps**; KeyBERT returns 4 spare phrases so 6 remain |
 | `required_skills` | the posting's skills from `data/skills.txt`, minus the nice-to-haves |
-| `nice_to_have` | skills in a sentence with "plus", "bonus", "preferred", "desired", … |
+| `nice_to_have` | skills in a sentence with "plus", "bonus", "preferred", "desired", …, or in the bullet lines under a heading with such a word ("Preferred Qualifications:") up to the next heading. The posting is split at line breaks and bullets as well as at full stops, so a "Preferred" heading never marks the "Minimum Qualifications" list above it. A skill also asked for outside a preferred part stays required |
 | `fit_summary` | the one-line `reason` + "the resume shows K of N key points" |
 | `gaps` | missing required skills, skill/degree/experience key phrases not on the resume, years/degree gaps (never role phrases) |
 | `interview_focus` | up to 3 gaps to probe first, then covered key points to ask for an example of, with the resume evidence |
@@ -616,7 +618,7 @@ Each job gets a score from 0 to 100:
 
 | Part | Points | How |
 |---|---|---|
-| Skill overlap | up to **60** | 60 × (matched skills ÷ skills the job lists) |
+| Skill overlap | up to **60** | 60 × (weight of matched skills ÷ weight of all skills the job lists); a required skill weighs **1.0**, a preferred (nice-to-have) skill **0.5** |
 | Text similarity | up to **40** | embedding cosine similarity, mapped to points (see below) |
 | Experience gap | **−10 per year** short, max −30 | if your total years < the job's minimum |
 | Degree gap | **−5** | if the job asks for a higher degree than you have |
@@ -629,6 +631,16 @@ catches overlap the skill list misses, like job titles, field of study, or
 related wording, but it's noisier, so it counts less. The experience penalty
 pushes senior roles down the list without removing them. The degree penalty
 is small because students often apply while still finishing a degree.
+
+**Why preferred skills count half.** A skill the posting calls "preferred",
+"a plus" or "nice to have" (see `nice_to_have` below) is not a must, so
+missing it should cost less than missing a required skill. Having it still
+shows a better fit, so it isn't ignored either; half weight does both.
+Example (a real Louisiana posting): Java and JavaScript under "Minimum
+Qualifications", Linux under "Preferred", and the candidate has Java:
+1.0 ÷ (1.0 + 1.0 + 0.5) = 0.4 → **24** skill points. Counting Linux as
+required gave 1 ÷ 3 → 20. The breakdown lists the half-weight skills in
+`preferred_skills`; `matched_skills` / `missing_skills` still list every skill.
 
 **Text similarity with embeddings** (`agents/embeddings.py`). An embedding
 model turns a text into a vector that captures its meaning, so related
@@ -761,6 +773,13 @@ A failed search is printed as `WARNING [Orchestrator]: Agent 2 search failed
 failed" never reads as "found no jobs". The command line prints the searches
 after the stage table.
 
+**Ranked jobs** — `output/ranked_jobs.json` (git-ignored) is written on every
+run: Agent 3's full ranking, best first, in the same format as
+`python agents/job_synthesizer.py` (score, `breakdown`, `assessment`, ...),
+for real JSearch jobs and fixture jobs alike, even if the user quits at the
+job choice. Resume quotes in the assessment are scrubbed like the brief (no
+name, email, phone or links). Agent 3's trace entry names the file.
+
 **Agent 4 handoff** — `output/interview_brief.json` (git-ignored). This is
 the contract with Agent 4 (`brief_version` changes if the format does):
 ```json
@@ -818,9 +837,9 @@ see the **Actions** tab on GitHub, or the ✓ / ✗ next to each commit.
 | `tests/test_train_ner.py` | Train/test split, exact-match P/R/F1 on known cases, a 1-epoch training smoke run, the committed model's saved metrics |
 | `tests/test_parser_ner.py` | NER parser with a fake "perfect" model: same profile as rules on the 3 fixtures, skill entity linking (aliases, unknown skills dropped, text matches added), planned-work skills dropped, company recovered from "Company | Title", Python date math, model mistakes filtered (fake dates, project roles, links), loud fallback when the model is missing, broken or crashes, pipeline default; plus the real committed model (F1 ≥ 0.90 on the hand-annotated resumes) |
 | `tests/test_unseen_layouts.py` | The 3 fake resumes in unseen layouts are readable (the PDF really has two columns) and the checker's field comparison works |
-| `tests/test_orchestrator.py` | The full run with fake Agent 2 LLM/provider: stage order and trace fields, fallbacks recorded, no contact details in the trace, fixture-job fallback (no key, failed searches, no jobs, crash) with a warning, per-search records and real vs fixture job counts in the trace, widening traced and warned, HTTP status in the error warning, no key = no Groq/JSearch calls, `--offline`; the terminal chooser (top 5 menu, number, invalid input asked again, custom role validated, quit / Ctrl-D); custom role through Agent 3; the interview brief (fields, original description, no contact details, free text scrubbed, none when the user quits) |
+| `tests/test_orchestrator.py` | The full run with fake Agent 2 LLM/provider: stage order and trace fields, fallbacks recorded, no contact details in the trace, fixture-job fallback (no key, failed searches, no jobs, crash) with a warning, per-search records and real vs fixture job counts in the trace, the full ranking saved to `ranked_jobs.json` (best first, also offline and on quit, resume quotes scrubbed), widening traced and warned, HTTP status in the error warning, no key = no Groq/JSearch calls, `--offline`; the terminal chooser (top 5 menu, number, invalid input asked again, custom role validated, quit / Ctrl-D); custom role through Agent 3; the interview brief (fields, original description, no contact details, free text scrubbed, none when the user quits) |
 | `tests/test_job_synthesizer.py` | Requirement extraction, scoring, penalties, ranking (on the TF-IDF fallback), the optional LLM key points with a fake Groq: score unchanged, no contact details in the prompt, every fallback case |
-| `tests/test_keypoints.py` | Embedding key points: spaCy candidate phrases, the real KeyBERT on a fake embedding model, resume matching (by skill, by similarity, not at all), nice-to-haves, field building, no Groq calls by default, score unchanged, fallbacks, the KeyBERT-vs-Groq matching in `scripts/compare_key_points.py` |
+| `tests/test_keypoints.py` | Embedding key points: spaCy candidate phrases, the real KeyBERT on a fake embedding model, resume matching (by skill, by similarity, not at all), nice-to-haves (cue sentences, "Preferred" sections split at line breaks and bullets, required wins), field building, no Groq calls by default, score unchanged, fallbacks, the KeyBERT-vs-Groq matching in `scripts/compare_key_points.py` |
 | `tests/test_embeddings.py` | Chunking, best-chunk similarity, the 0–40 mapping, scores not depending on other jobs, fallback |
 | `tests/test_pipeline.py` | `run_pipeline` and the `/rank` endpoint (FastAPI `TestClient`) |
 | `tests/test_job_search_agent.py` | Agent 2 loop with a scripted fake LLM: search/finish, merging, repeat queries, step and job limits, rule-based fallback, provider errors (status in the trace, logged warning), per-search records, widening city → state → Remote (and when not to widen), prompt contains no contact details, query cleaning |
@@ -959,7 +978,9 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
 - **The 0.45 / 0.55 thresholds** come from only 3 fake resumes and 6 jobs,
   and fit only this model.
 - **Nice-to-haves are cue words**: only skills in a sentence with "plus",
-  "bonus", "preferred", … are found.
+  "bonus", "preferred", … or under a heading with such a word are found. A
+  heading glued inside a flattened bullet ("• Java Preferred: • Docker") is
+  not recognised.
 
 **Agent 3, key points (optional LLM, off by default)**
 - **Groq free-tier rate limit:** about 3 jobs per minute (88 s for 6 jobs
