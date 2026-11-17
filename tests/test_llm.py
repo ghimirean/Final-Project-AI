@@ -59,6 +59,9 @@ def test_groq_json_with_schema(monkeypatch, keys):
     assert result == {"name": "Ada", "age": 36}
     assert calls[0]["body"]["model"] == "llama-test"
     assert calls[0]["body"]["response_format"] == {"type": "json_object"}
+    # repeatable answers: lowest temperature and a fixed seed
+    assert calls[0]["body"]["temperature"] == 0
+    assert calls[0]["body"]["seed"] == llm.GROQ_SEED
     assert calls[0]["headers"]["Authorization"] == f"Bearer {FAKE_KEY}"
 
 

@@ -430,3 +430,90 @@ def test_save_ranked_jobs_scrubs_resume_quotes(tmp_path):
         assert private not in text
     assert "the candidate built it" in text
     assert ranked[0]["assessment"]["fit_summary"].startswith("Priya")     # input not changed
+
+
+# ---------- --demo: replay the last real jobs, no Groq or JSearch ----------
+
+class CachedProvider(FakeProvider):
+    """A provider with a cache_path, like JSearchProvider."""
+
+    def __init__(self, cache_path, **kwargs):
+        super().__init__(**kwargs)
+        self.cache_path = cache_path
+
+
+def write_cache(path, entries):
+    """entries: {query: (time, [raw JSearch-style jobs])}"""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({q: {"time": t, "jobs": jobs} for q, (t, jobs) in entries.items()}, f)
+
+
+def test_real_run_saves_jobs_for_demo(tmp_path, agent2_llm):
+    run(tmp_path, provider=FakeProvider([raw_job(1), raw_job(2)]))
+    saved = json.load(open(tmp_path / "demo_jobs.json", encoding="utf-8"))
+    assert [j["id"] for j in saved["jobs"]] == ["fake-1", "fake-2"]
+    assert saved["location"] == "Remote" and saved["searches"]
+
+
+def test_fixture_run_does_not_overwrite_demo_jobs(tmp_path):
+    run(tmp_path, offline=True)
+    assert not (tmp_path / "demo_jobs.json").exists()
+
+
+def test_demo_replays_saved_jobs_without_groq_or_jsearch(tmp_path, agent2_llm, capsys):
+    run(tmp_path, provider=FakeProvider([raw_job(1), raw_job(2)]))     # the real run
+    agent2_llm.clear()
+    provider = CachedProvider(str(tmp_path / "no_cache.json"))
+    result = run(tmp_path, provider=provider, demo=True)
+    assert agent2_llm == [] and provider.calls == 0                   # no Groq, no JSearch
+    assert result["jobs_source"] == "demo replay"
+    assert {r["id"] for r in result["ranked_jobs"]} == {"fake-1", "fake-2"}
+    agent2 = trace_of(result)[1]
+    assert agent2["fallback"].startswith("demo replay")
+    assert agent2["details"]["search_mode"] == "demo replay"
+    assert agent2["details"]["real_jobs"] == 2 and agent2["details"]["fixture_jobs"] == 0
+    assert "demo replay" in capsys.readouterr().err
+    brief = json.load(open(result["handoff"]["brief"], encoding="utf-8"))
+    assert brief["jobs_source"] == "demo replay"
+
+
+def test_demo_uses_newest_cache_entry_and_drops_duplicates(tmp_path):
+    def jsearch_raw(n, location="Remote", url=None):
+        return {"id": f"u{n}", "title": "Data Analyst", "company": "Acme Inc",
+                "location": location, "url": url or f"https://x.test/{n}",
+                "description": "Analyze data with SQL."}
+    cache = str(tmp_path / "cache.json")
+    write_cache(cache, {"old query": (1000.0, [jsearch_raw(9)]),
+                        "new query": (2000.0, [jsearch_raw(1),
+                                               jsearch_raw(2, "Austin, TX", "https://y.test/2")])})
+    result = run(tmp_path, provider=CachedProvider(cache), demo=True)
+    assert [r["id"] for r in result["ranked_jobs"]] == ["jsearch-u1"]   # u2 is the same posting
+    details = trace_of(result)[1]["details"]
+    assert details["replayed_from"] == "output/jsearch_cache.json"
+    assert details["original_query"] == "new query"
+
+
+def test_demo_picks_the_newer_of_snapshot_and_cache(tmp_path):
+    cache = str(tmp_path / "cache.json")
+    write_cache(cache, {"q": (1000.0, [{"id": "c1", "title": "Cache Job", "company": "A",
+                                        "location": "", "url": "", "description": "SQL."}])})
+    with open(tmp_path / "demo_jobs.json", "w", encoding="utf-8") as f:
+        json.dump({"time": 5000.0, "location": "Monroe, LA", "searches": [],
+                   "jobs": [{"id": "snap-1", "title": "Snapshot Job", "company": "B",
+                             "location": "Louisiana", "url": "", "description": "Java."}]}, f)
+    result = run(tmp_path, provider=CachedProvider(cache), demo=True)
+    assert [r["id"] for r in result["ranked_jobs"]] == ["snap-1"]
+    assert trace_of(result)[1]["details"]["original_location"] == "Monroe, LA"
+
+
+def test_demo_without_saved_jobs_uses_fixture_jobs_with_a_warning(tmp_path, agent2_llm, capsys):
+    provider = CachedProvider(str(tmp_path / "missing.json"))
+    result = run(tmp_path, provider=provider, demo=True)
+    assert result["jobs_source"] == "fixture" and provider.calls == 0 and agent2_llm == []
+    assert "demo replay found no saved real jobs" in capsys.readouterr().err
+    assert trace_of(result)[1]["details"]["search_mode"] == "demo replay"
+
+
+def test_demo_and_offline_together_are_refused(tmp_path):
+    with pytest.raises(ValueError, match="not both"):
+        run(tmp_path, offline=True, demo=True)

@@ -11,6 +11,7 @@ them in the exact shape Agent 3 / run_pipeline() expects:
 build_query() is also the rule-based fallback the agent uses if the LLM fails.
 """
 import hashlib
+import re
 
 JOB_FIELDS = ("id", "title", "company", "location", "url", "description")
 
@@ -37,18 +38,60 @@ def normalize_job(raw, source):
     return job
 
 
+# Legal-form words that don't tell two employers apart
+COMPANY_FORMS = r"\b(?:the|inc|llc|ltd|corp|corporation|co|company|companies|plc|lp)\b"
+
+
+def _norm(text):
+    """Lowercase words and digits only: "React Full-Stack!" -> "react full stack"."""
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).split())
+
+
+def _norm_company(company):
+    """"Marsh & McLennan Companies" and "Marsh McLennan" -> "marsh mclennan"."""
+    return " ".join(re.sub(COMPANY_FORMS, " ", _norm(company)).split())
+
+
+def duplicate_keys(job):
+    """The keys under which two postings count as the same job:
+    - the same url, or
+    - the same title and company (normalized) AND the same location, or
+    - the same title and company AND the same description text.
+    The last one catches one posting listed on several job boards under
+    different cities (seen on JSearch: the same remote role in Mandeville, LA
+    and in Lake Charles, LA, word for word). Different openings of the same
+    title at the same company stay apart if both location and text differ."""
+    title, company = _norm(job.get("title")), _norm_company(job.get("company"))
+    text = hashlib.sha1(_norm(job.get("description")).encode()).hexdigest()[:16]
+    keys = {("place", title, company, _norm(job.get("location"))),
+            ("text", title, company, text)}
+    if job.get("url"):
+        keys.add(("url", job["url"]))
+    return keys
+
+
+class JobDeduper:
+    """Remembers the jobs seen so far; add(job) is False for a duplicate."""
+
+    def __init__(self):
+        self.seen = set()
+
+    def add(self, job):
+        keys = duplicate_keys(job)
+        if keys & self.seen:
+            return False
+        self.seen |= keys
+        return True
+
+
 def search_jobs(query, provider, limit=20):
-    """Runs the provider, cleans the results, removes duplicates (same url,
-    or same title + company when there is no url) and caps at `limit`."""
-    jobs, seen = [], set()
+    """Runs the provider, cleans the results, removes duplicates (see
+    duplicate_keys) and caps at `limit`."""
+    jobs, seen = [], JobDeduper()
     for raw in provider.search(query, limit):
         job = normalize_job(raw, provider.name)
-        if job is None:
+        if job is None or not seen.add(job):
             continue
-        key = job["url"] or (job["title"].lower(), job["company"].lower())
-        if key in seen:
-            continue
-        seen.add(key)
         jobs.append(job)
         if len(jobs) >= limit:
             break

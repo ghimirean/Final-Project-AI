@@ -70,6 +70,12 @@ Every LLM call (Agent 2, and the optional LLM modes of Agents 1 and 3) goes thro
 - **Retries:** "busy" API errors (HTTP 429/5xx) are retried up to 2 times.
   On a rate limit the API says how long to wait (`retry-after` header), and
   the helper waits that long, up to 30 seconds.
+- **Repeatable answers:** every call uses temperature 0, and Groq calls also
+  send a fixed `seed` (`GROQ_SEED` in `agents/llm.py`). With it, Agent 2's
+  first step for sample.pdf picked the same search (`Software Developer` +
+  Java, OOP) 3 times out of 3; without it, two runs picked different titles.
+  Groq calls the seed "best effort", so for a demo that must show the same
+  jobs every time use `--demo` (see Orchestrator).
 
 ---
 
@@ -319,6 +325,16 @@ our own loop (no agent frameworks):
    `max_steps` steps (default and maximum `MAX_STEPS` = 4). Each step is at
    most one search, so `max_steps` also caps the JSearch requests per run.
    Jobs from all searches are merged without duplicates.
+
+**Duplicates.** Two postings count as the same job (`duplicate_keys` in
+`agents/job_search.py`) if they have the same url, or the same title and
+company (lowercased, punctuation and "Inc"/"LLC"/"Companies" ignored) **and**
+either the same location or the same description text. The description rule
+catches one posting listed on two job boards under different cities (a real
+JSearch case: the same remote Marsh & McLennan role in Mandeville, LA and Lake
+Charles, LA, word for word). Two openings with the same title at the same
+company are kept apart if both the location and the text differ. This is
+checked inside one search and across all of Agent 2's searches.
 
 **The LLM never sees contact details or resume text**: only skills, job
 titles, years of experience and project names and skills.
@@ -727,6 +743,7 @@ python agents/orchestrator.py data/sample.pdf --location "Monroe, LA"   # real j
 python agents/orchestrator.py data/sample.pdf --offline                 # fake jobs, no JSearch/Groq calls
 python agents/orchestrator.py data/sample.pdf --max-steps 1             # at most 1 JSearch request
 python agents/orchestrator.py data/sample.pdf --offline --auto          # pick the top job, no questions
+python agents/orchestrator.py data/sample.pdf --demo                    # replay the last REAL jobs, no JSearch/Groq calls
 ```
 Use `--offline` during rehearsals: it uses the 6 fake jobs in
 `tests/fixtures/jobs.json` on purpose and saves the JSearch quota (about 200
@@ -744,6 +761,20 @@ the list; Agent 3 scores it from the role name alone), or `None` to stop
 before Agent 4. `make_terminal_chooser()` is the terminal version: it shows
 the top 5 (score, title, company, gaps) and accepts a number, `c` for a
 custom role, or `q` / Ctrl-D to quit. Invalid input is explained and asked again.
+
+**Demo replay** (`--demo`, `run_intervai(..., demo=True)`). Shows the same
+real jobs in every rehearsal and in the live demo, at no cost: no Groq call
+and no JSearch request is made. Every run in which Agent 2 found real jobs
+saves them to `output/demo_jobs.json` (git-ignored, never expires). `--demo`
+replays that file, or the newest entry of `output/jsearch_cache.json` (its
+24-hour limit ignored) when that is newer or the file is missing, with
+duplicates removed. Agent 2's trace entry says `"demo replay"` (`fallback`,
+`search_mode` and `jobs_source`) and names where the jobs came from; the
+interview brief's `jobs_source` is `"demo replay"` too. Agents 1 and 3 and the
+job choice run normally. With no saved real jobs, the fake fixture jobs are
+used with a WARNING. `--demo` and `--offline` can't be used together.
+**Before the demo:** do one real run on the demo laptop (it also downloads
+MiniLM), then use `--demo` for every rehearsal and for the demo itself.
 
 **Fallbacks** (each one is printed as a `WARNING [Orchestrator]` and recorded):
 if Agent 2 can't search (no `RAPIDAPI_KEY`, quota used up, a network or API
@@ -837,12 +868,12 @@ see the **Actions** tab on GitHub, or the ✓ / ✗ next to each commit.
 | `tests/test_train_ner.py` | Train/test split, exact-match P/R/F1 on known cases, a 1-epoch training smoke run, the committed model's saved metrics |
 | `tests/test_parser_ner.py` | NER parser with a fake "perfect" model: same profile as rules on the 3 fixtures, skill entity linking (aliases, unknown skills dropped, text matches added), planned-work skills dropped, company recovered from "Company | Title", Python date math, model mistakes filtered (fake dates, project roles, links), loud fallback when the model is missing, broken or crashes, pipeline default; plus the real committed model (F1 ≥ 0.90 on the hand-annotated resumes) |
 | `tests/test_unseen_layouts.py` | The 3 fake resumes in unseen layouts are readable (the PDF really has two columns) and the checker's field comparison works |
-| `tests/test_orchestrator.py` | The full run with fake Agent 2 LLM/provider: stage order and trace fields, fallbacks recorded, no contact details in the trace, fixture-job fallback (no key, failed searches, no jobs, crash) with a warning, per-search records and real vs fixture job counts in the trace, the full ranking saved to `ranked_jobs.json` (best first, also offline and on quit, resume quotes scrubbed), widening traced and warned, HTTP status in the error warning, no key = no Groq/JSearch calls, `--offline`; the terminal chooser (top 5 menu, number, invalid input asked again, custom role validated, quit / Ctrl-D); custom role through Agent 3; the interview brief (fields, original description, no contact details, free text scrubbed, none when the user quits) |
+| `tests/test_orchestrator.py` | The full run with fake Agent 2 LLM/provider: stage order and trace fields, fallbacks recorded, no contact details in the trace, fixture-job fallback (no key, failed searches, no jobs, crash) with a warning, per-search records and real vs fixture job counts in the trace, the full ranking saved to `ranked_jobs.json` (best first, also offline and on quit, resume quotes scrubbed), `--demo` replay (saved jobs or newest cache entry, whichever is newer, no Groq/JSearch calls, traced as demo replay, fixture fallback with a warning, not with `--offline`), widening traced and warned, HTTP status in the error warning, no key = no Groq/JSearch calls, `--offline`; the terminal chooser (top 5 menu, number, invalid input asked again, custom role validated, quit / Ctrl-D); custom role through Agent 3; the interview brief (fields, original description, no contact details, free text scrubbed, none when the user quits) |
 | `tests/test_job_synthesizer.py` | Requirement extraction, scoring, penalties, ranking (on the TF-IDF fallback), the optional LLM key points with a fake Groq: score unchanged, no contact details in the prompt, every fallback case |
 | `tests/test_keypoints.py` | Embedding key points: spaCy candidate phrases, the real KeyBERT on a fake embedding model, resume matching (by skill, by similarity, not at all), nice-to-haves (cue sentences, "Preferred" sections split at line breaks and bullets, required wins), field building, no Groq calls by default, score unchanged, fallbacks, the KeyBERT-vs-Groq matching in `scripts/compare_key_points.py` |
 | `tests/test_embeddings.py` | Chunking, best-chunk similarity, the 0–40 mapping, scores not depending on other jobs, fallback |
 | `tests/test_pipeline.py` | `run_pipeline` and the `/rank` endpoint (FastAPI `TestClient`) |
-| `tests/test_job_search_agent.py` | Agent 2 loop with a scripted fake LLM: search/finish, merging, repeat queries, step and job limits, rule-based fallback, provider errors (status in the trace, logged warning), per-search records, widening city → state → Remote (and when not to widen), prompt contains no contact details, query cleaning |
+| `tests/test_job_search_agent.py` | Agent 2 loop with a scripted fake LLM: search/finish, merging (the same posting from two searches counts once), repeat queries, step and job limits, rule-based fallback, provider errors (status in the trace, logged warning), per-search records, widening city → state → Remote (and when not to widen), prompt contains no contact details, query cleaning |
 | `tests/test_jsearch_provider.py` | JSearch provider with a fake HTTP call: request building, result parsing, error cases with their HTTP status, `last_request` (status, raw count, cache hits), key never in error messages; query cache in a temp folder: a hit skips the request, expired entries are refreshed, errors and empty results aren't cached, a corrupt file is ignored, `cache_path=None` turns it off |
 | `tests/test_search_endpoint.py` | `POST /search`: NER parser used, success, fallback, empty results, bad input (file type, `limit`, `max_steps`), `max_steps` default and pass-through, 502 on job source failure |
 

@@ -21,6 +21,13 @@ found), the fake jobs in tests/fixtures/jobs.json are used instead, with a
 visible WARNING. offline=True (--offline) uses them on purpose, to save the
 JSearch quota during rehearsals.
 
+demo=True (--demo) replays the most recent REAL search results without calling
+Groq or JSearch, so rehearsals and the live demo show the same real jobs at no
+cost. Every run where Agent 2 found real jobs saves them to
+output/demo_jobs.json; --demo uses that file, or the newest entry of the
+JSearch cache (output/jsearch_cache.json) if that is newer or the file is
+missing. Agent 2's trace entry says "demo replay".
+
 Every stage is logged (agent, kind of AI, model, seconds, fallback) to
 output/run_trace.json. Agent 3's full ranking (best first, same format as
 `python agents/job_synthesizer.py`) is saved to output/ranked_jobs.json. The chosen job and a candidate summary go to Agent 4
@@ -30,6 +37,7 @@ holds the candidate's name, email, phone or links.
 Command line (from the project root):
     python agents/orchestrator.py data/sample.pdf --location "Monroe, LA"
     python agents/orchestrator.py data/sample.pdf --offline     # no JSearch / Groq calls
+    python agents/orchestrator.py data/sample.pdf --demo        # replay the last real jobs
 """
 import argparse
 import json
@@ -40,9 +48,10 @@ import time
 from datetime import datetime
 
 from embeddings import EMBED_CONFIG
+from job_search import JobDeduper, normalize_job
 from job_search_agent import LLM_CONFIG as AGENT2_LLM, MAX_STEPS, run_job_agent
 from job_synthesizer import SKILLS_PATH, load_jobs, rank_jobs, save_json
-from jsearch_provider import JSearchProvider
+from jsearch_provider import DEFAULT_CACHE_PATH, JSearchProvider
 from resume_parser import NER_CONFIG, URL_PATTERN, parse_resume_ner
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -110,7 +119,61 @@ def warn_search_errors(records):
             warn(f"Agent 2 search failed ({status}) for {r.get('query_text')!r}: {r['error']}")
 
 
-def search_jobs_with_fallback(profile, location, provider, offline, limit, max_steps):
+# ---------- --demo: replay the last real search results ----------
+
+DEMO_REPLAY = "demo replay"
+
+
+def save_demo_jobs(jobs, location, details, out_dir):
+    """After a real search: keeps its jobs in output/demo_jobs.json for --demo.
+    Unlike the JSearch cache, this file never expires."""
+    path = os.path.join(out_dir, "demo_jobs.json")
+    save_json({"saved": datetime.now().isoformat(timespec="seconds"), "time": time.time(),
+               "location": location or None, "searches": details.get("searches", []),
+               "jobs": jobs}, path)
+    return path
+
+
+def _read_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def load_demo_jobs(out_dir, cache_path):
+    """The most recent real jobs: output/demo_jobs.json or the newest JSearch
+    cache entry (its 24-hour limit is ignored here), whichever is newer.
+    Returns (jobs, info) or (None, None) if there are no real jobs saved."""
+    options = []
+    snapshot = _read_json(os.path.join(out_dir, "demo_jobs.json"))
+    if isinstance(snapshot, dict) and snapshot.get("jobs"):
+        options.append((snapshot.get("time") or 0, snapshot["jobs"], {
+            "replayed_from": "output/demo_jobs.json (last real run)",
+            "original_location": snapshot.get("location"),
+            "searches": snapshot.get("searches", [])}))
+    cache = _read_json(cache_path) if cache_path else None
+    if isinstance(cache, dict):
+        entries = [(v["time"], q, v["jobs"]) for q, v in cache.items()
+                   if isinstance(v, dict) and isinstance(v.get("time"), (int, float))
+                   and isinstance(v.get("jobs"), list) and v["jobs"]]
+        if entries:
+            saved, query, raw = max(entries)
+            jobs = [j for j in (normalize_job(r, JSearchProvider.name) for r in raw) if j]
+            options.append((saved, jobs, {"replayed_from": "output/jsearch_cache.json",
+                                          "original_query": query, "searches": []}))
+    if not options:
+        return None, None
+    saved, jobs, info = max(options, key=lambda o: o[0])
+    seen = JobDeduper()
+    jobs = [j for j in jobs if seen.add(j)]
+    info["saved"] = datetime.fromtimestamp(saved).isoformat(timespec="seconds") if saved else None
+    return (jobs or None), info
+
+
+def search_jobs_with_fallback(profile, location, provider, offline, limit, max_steps,
+                              demo=False, out_dir=OUTPUT_DIR):
     """Agent 2, or the fixture jobs.
     Returns (jobs, source "jsearch" | "fixture", fallback in words or None, details).
     details has one record per real search ("searches") and keeps real JSearch
@@ -119,6 +182,23 @@ def search_jobs_with_fallback(profile, location, provider, offline, limit, max_s
         jobs = load_jobs(FIXTURE_JOBS)
         return (jobs, "fixture", "offline mode: fixture jobs used on purpose",
                 {"real_jobs": 0, "fixture_jobs": len(jobs), "searches": []})
+    if demo:
+        jobs, info = load_demo_jobs(out_dir, getattr(provider, "cache_path", DEFAULT_CACHE_PATH))
+        if jobs:
+            jobs = jobs[:limit]
+            reason = (f"{DEMO_REPLAY}: {len(jobs)} real JSearch jobs saved {info['saved']}, "
+                      "no Groq or JSearch calls")
+            print(f"NOTE [Orchestrator]: {reason} (from {info['replayed_from']})", file=sys.stderr)
+            details = {"search_mode": DEMO_REPLAY, "real_jobs": len(jobs), "fixture_jobs": 0,
+                       **info}
+            return jobs, DEMO_REPLAY, reason, details
+        reason = ("demo replay found no saved real jobs (run once without --demo first; "
+                  "no Groq or JSearch calls were made)")
+        warn(f"{reason}. Using the fake jobs in tests/fixtures/jobs.json instead.")
+        jobs = load_jobs(FIXTURE_JOBS)
+        return (jobs, "fixture", reason,
+                {"search_mode": DEMO_REPLAY, "real_jobs": 0, "fixture_jobs": len(jobs),
+                 "searches": []})
     details = {"real_jobs": 0, "searches": []}
     if not getattr(provider, "api_key", True):           # checked first: saves the Groq calls
         reason = "no JSearch key (RAPIDAPI_KEY not set in .env)"
@@ -251,12 +331,14 @@ def handoff_to_agent4(selected, description, profile, jobs_source, out_dir):
 
 
 def run_intervai(resume_path, location="", choose_job=None, offline=False, provider=None,
-                 limit=20, max_steps=MAX_STEPS, out_dir=OUTPUT_DIR):
+                 limit=20, max_steps=MAX_STEPS, out_dir=OUTPUT_DIR, demo=False):
     """Runs Agent 1 -> Agent 2 -> Agent 3 -> HITL -> Agent 4 handoff.
     Returns {"profile", "jobs_source", "ranked_jobs", "selected", "handoff",
     "trace_path", "ranked_path"}. selected and handoff are None if the user quits."""
     if choose_job is None:
         raise ValueError("choose_job is required: a function that picks one ranked job")
+    if offline and demo:
+        raise ValueError("use offline (fake jobs) or demo (replay real jobs), not both")
     trace = Trace()
 
     # Agent 1: NER resume parser
@@ -270,8 +352,10 @@ def run_intervai(resume_path, location="", choose_job=None, offline=False, provi
     # Agent 2: LLM job search with the JSearch tool (or the fixture jobs)
     t = time.time()
     provider = provider or JSearchProvider()
-    jobs, source, fallback, details = search_jobs_with_fallback(profile, location, provider, offline,
-                                                      limit, max_steps)
+    jobs, source, fallback, details = search_jobs_with_fallback(
+        profile, location, provider, offline, limit, max_steps, demo=demo, out_dir=out_dir)
+    if source == "jsearch":                              # real jobs: keep them for --demo
+        save_demo_jobs(jobs, location, details, out_dir)
     trace.stage("agent2", time.time() - t, fallback=fallback,
                 jobs_source=source, jobs_found=len(jobs),
                 location=location or None, **details)
@@ -387,7 +471,9 @@ def print_trace(path):
     for s in stages:
         searches = s["details"].get("searches")
         if searches:
-            print(f"\nAgent 2 searches (real jobs: {s['details'].get('real_jobs', 0)}, "
+            replay = s["details"].get("search_mode") == DEMO_REPLAY
+            print(f"\nAgent 2 searches{' (REPLAYED from the saved run, not made now)' if replay else ''}"
+                  f" (real jobs: {s['details'].get('real_jobs', 0)}, "
                   f"fixture jobs: {s['details'].get('fixture_jobs', 0)}):")
             for r in searches:
                 status = "cache" if r.get("from_cache") else (r.get("http_status") or "-")
@@ -400,8 +486,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the INTERVAI agents end to end.")
     parser.add_argument("resume", nargs="?", default=os.path.join(ROOT, "data", "sample.pdf"))
     parser.add_argument("--location", default="", help='e.g. "Monroe, LA" or "Remote"')
-    parser.add_argument("--offline", action="store_true",
-                        help="use the fake fixture jobs instead of JSearch (saves the quota)")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--offline", action="store_true",
+                      help="use the fake fixture jobs instead of JSearch (saves the quota)")
+    mode.add_argument("--demo", action="store_true",
+                      help="replay the last real search results (no Groq or JSearch calls)")
     parser.add_argument("--max-steps", type=int, default=MAX_STEPS,
                         help=f"Agent 2 search steps, each at most one JSearch request (default {MAX_STEPS})")
     parser.add_argument("--auto", action="store_true",
@@ -410,7 +499,7 @@ if __name__ == "__main__":
 
     chooser = choose_top_job if args.auto else make_terminal_chooser()
     result = run_intervai(args.resume, args.location, choose_job=chooser,
-                          offline=args.offline, max_steps=args.max_steps)
+                          offline=args.offline, max_steps=args.max_steps, demo=args.demo)
     print(f"Jobs from: {result['jobs_source']}, ranked: {len(result['ranked_jobs'])}")
     if result["selected"]:
         print(f"Chosen: {result['selected']['title']} - {result['selected']['company']} "

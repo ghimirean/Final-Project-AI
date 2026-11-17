@@ -30,6 +30,12 @@ TIMEOUT_SECONDS = 60
 RETRIES = 2               # extra tries after a "busy" error
 RETRY_WAIT_SECONDS = 3    # default wait between tries
 MAX_RETRY_WAIT_SECONDS = 30
+# Repeatable answers: every call uses temperature 0, and Groq also gets a
+# fixed seed (it accepts one for openai/gpt-oss-120b; checked Nov 16). Same
+# prompt -> the same answer most of the time, so Agent 2 usually picks the
+# same searches. Groq calls it best effort, so for a demo that must show the
+# same jobs every time use the orchestrator's --demo replay instead.
+GROQ_SEED = 42
 
 PROVIDERS = {
     "gemini": {
@@ -101,7 +107,7 @@ def _call_gemini(prompt, model, want_json):
 def _call_groq(prompt, model, want_json):
     url = PROVIDERS["groq"]["url"]
     headers = {"Authorization": f"Bearer {get_api_key('groq')}"}
-    body = {"model": model, "temperature": 0,
+    body = {"model": model, "temperature": 0, "seed": GROQ_SEED,
             "messages": [{"role": "user", "content": prompt}]}
     if want_json:
         body["response_format"] = {"type": "json_object"}

@@ -116,6 +116,15 @@ def test_second_prompt_shows_first_search_results(monkeypatch):
     assert "Data Analyst 1 - Acme" in prompts[1]
 
 
+def test_same_posting_from_two_searches_counts_once(monkeypatch):
+    script(monkeypatch, search(["Python"]), search(["SQL"]), FINISH)
+    first = raw_job(1)
+    again = dict(first, id="99", url="https://other-board.test/99", location="Austin, TX")
+    result = agent.run_job_agent(PROFILE, FakeProvider([first], [again, raw_job(2)]))
+    assert [j["id"] for j in result["jobs"]] == ["fake-1", "fake-2"]
+    assert result["trace"][1]["new"] == 1
+
+
 def test_duplicate_query_is_not_rerun(monkeypatch):
     script(monkeypatch, search(["Python", "SQL"]), search(["sql", "PYTHON"]), FINISH)
     provider = FakeProvider([raw_job(1)], [raw_job(2)])
