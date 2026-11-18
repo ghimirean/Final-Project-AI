@@ -191,6 +191,7 @@ def test_record_video_writes_a_file_with_real_time_length(tmp_path):
     def stop():                       # stop after about 1 second of wall-clock time
         started["n"] += 1
         return started["n"] > 1 and os.path.exists(path) and iv.time.time() - t0 > 1.0
+    import cv2  # noqa: F401  load OpenCV first, so its slow first import isn't counted as recording time
     t0 = iv.time.time()
     seconds = iv.record_video(path, stop=stop, camera=camera)
     assert camera.released
