@@ -11,6 +11,8 @@ Safety nets, applied to EVERY test:
   test turns KeyBERT on with a fake embedding model (tests/test_keypoints.py).
 - No Whisper model and no microphone: the loaders in agents/interview_speech.py
   always fail, so Agent 4's speech tests install fakes (tests/test_interview_speech.py).
+- No webcam, MediaPipe models or video analysis: the loaders in agents/interview_vision.py
+  always fail, so Agent 4's vision tests install fakes (tests/test_interview_vision.py).
 - No trained NER model by default: the loader in agents/resume_parser.py
   always fails, so Agent 1 uses its rule-based fallback unless a test
   installs a fake model (tests/test_parser_ner.py) or undoes this to load
@@ -26,6 +28,7 @@ sys.path.insert(0, os.path.join(ROOT, "agents"))
 
 import embeddings  # noqa: E402
 import interview_speech  # noqa: E402
+import interview_vision  # noqa: E402
 import keypoints  # noqa: E402
 import llm  # noqa: E402
 import resume_parser  # noqa: E402
@@ -70,3 +73,14 @@ def no_real_whisper_or_microphone(monkeypatch):
         raise interview_speech.SpeechError("the real microphone is disabled in tests")
     monkeypatch.setattr(interview_speech, "_load_whisper_model", blocked_model)
     monkeypatch.setattr(interview_speech, "_sounddevice", blocked_sounddevice)
+
+
+@pytest.fixture(autouse=True)
+def no_real_camera_or_mediapipe(monkeypatch):
+    def blocked_camera(index=0):
+        raise interview_vision.VisionError("the real webcam is disabled in tests")
+
+    def blocked_models():
+        raise interview_vision.VisionError("the real MediaPipe models are disabled in tests")
+    monkeypatch.setattr(interview_vision, "_open_camera", blocked_camera)
+    monkeypatch.setattr(interview_vision, "_make_detectors", blocked_models)
