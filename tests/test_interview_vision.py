@@ -312,3 +312,37 @@ def test_failed_download_tells_how_to_fix_it(tmp_path, monkeypatch):
     with pytest.raises(VisionError, match="storage.googleapis.com.*face_landmarker.task"):
         iv.ensure_model("face_landmarker.task")
     assert not (tmp_path / "face_landmarker.task").exists()
+
+
+# ---------- the glue to MediaPipe's real result types (no model needed) ----------
+
+def test_detect_reads_mediapipe_result_objects():
+    pytest.importorskip("mediapipe")
+    from mediapipe.tasks.python import vision
+    from mediapipe.tasks.python.components.containers import category, landmark
+    cat, point = category.Category, landmark.NormalizedLandmark
+
+    class FakeFace:
+        def __init__(self, found):
+            self.found = found
+
+        def detect_for_video(self, image, ms):
+            assert image.width == 64 and image.height == 48 and ms == 7
+            return vision.FaceLandmarkerResult(
+                face_landmarks=[[point(x=.5, y=.5, z=0)] * 478] if self.found else [],
+                face_blendshapes=[[cat(index=0, score=.9, display_name="", category_name="mouthSmileLeft")]] if self.found else [],
+                facial_transformation_matrixes=[])
+
+    class FakePose:
+        def __init__(self, found):
+            self.found = found
+
+        def detect_for_video(self, image, ms):
+            return vision.PoseLandmarkerResult(
+                pose_landmarks=[[point(x=.5, y=.5, z=0, visibility=.9)] * 33] if self.found else [],
+                pose_world_landmarks=[], segmentation_masks=None)
+    frame = np.zeros((48, 64, 3), np.uint8)
+    face_points, shapes, pose_points = iv._detect(FakeFace(True), FakePose(True), frame, 7)
+    assert len(face_points) == 478 and shapes == {"mouthSmileLeft": pytest.approx(0.9)}
+    assert len(pose_points) == 33 and pose_points[0].visibility == pytest.approx(0.9)
+    assert iv._detect(FakeFace(False), FakePose(False), frame, 7) == (None, {}, None)
