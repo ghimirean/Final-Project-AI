@@ -196,6 +196,11 @@ def record_video(path, stop=None, max_seconds=MAX_RECORD_SECONDS, camera=None):
                 writer.write(last)
                 frames += 1
             time.sleep(max(0.0, started + frames / RECORD_FPS - time.time()))   # wait for the next tick
+        if writer is not None and last is not None:
+            due = int((time.time() - started) * RECORD_FPS)
+            while frames < due:
+                writer.write(last)
+                frames += 1
     finally:
         camera.release()
         if writer is not None:
