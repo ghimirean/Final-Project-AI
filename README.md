@@ -756,7 +756,10 @@ python agents/orchestrator.py data/sample.pdf --offline                 # fake j
 python agents/orchestrator.py data/sample.pdf --max-steps 1             # at most 1 JSearch request
 python agents/orchestrator.py data/sample.pdf --offline --auto          # pick the top job, no questions
 python agents/orchestrator.py data/sample.pdf --demo                    # replay the last REAL jobs, no JSearch/Groq calls
+python agents/orchestrator.py data/sample.pdf --demo --interview        # ...then run Agent 4, the mock interview, for the chosen job
 ```
+`--interview` starts Agent 4 (microphone + webcam, `output/interview_results.json`) right after the job choice, and
+only if a job was chosen in this run: after a Quit there is no new brief and Agent 4 is not started.
 Use `--offline` during rehearsals: it uses the 6 fake jobs in
 `tests/fixtures/jobs.json` on purpose and saves the JSearch quota (about 200
 requests a month). Agent 2's own on-disk cache also avoids repeat requests.
@@ -969,8 +972,9 @@ different kind of AI from Agent 2. Nothing is sent anywhere, and no API key is n
 
 **Run it**
 ```bash
-python agents/orchestrator.py data/sample.pdf --demo      # choose a job; wait for "Interview brief for Agent 4"
-python agents/interview_agent.py                          # live: microphone + webcam
+python agents/orchestrator.py data/sample.pdf --demo --interview   # the whole app: Agents 1-3, job choice, then the interview
+python agents/orchestrator.py data/sample.pdf --demo      # or: choose a job and wait for "Interview brief for Agent 4"...
+python agents/interview_agent.py                          # ...then run the interview alone: microphone + webcam
 python agents/interview_agent.py --questions-only         # just print the questions, record nothing
 python agents/interview_agent.py --audio a1.wav a2.wav --video v1.avi v2.avi   # pre-recorded answers, in question order
 ```
@@ -1332,7 +1336,8 @@ Real resumes (`data/*.pdf`, `data/*.docx`), `output/`, `recordings/` and the Med
 - **The brief is trusted for its content.** Agent 4 checks the version, the job title and that the brief is not older
   than the latest orchestrator run, but not that the questions make sense for the job.
 - **No audio or video is kept in the results file**, only the metrics, the transcripts and the path of the recording.
-  The orchestrator does not call Agent 4 by itself yet: run `python agents/interview_agent.py` after the job choice.
+  The dashboard (`streamlit run dashboard.py`) only writes the brief: start the interview afterwards with
+  `python agents/interview_agent.py`.
 
 **Orchestrator**
 - **`--demo` replays the jobs of the last real run** (or the newest cache
