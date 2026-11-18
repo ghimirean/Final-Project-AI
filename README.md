@@ -1,8 +1,9 @@
 # INTERVAI
 
 A multi-agent AI mock interview platform. This README covers **Agent 1
-(Resume Parser)**, **Agent 2 (Job Search)**, **Agent 3 (Job Description Synthesizer + Match Scoring)**
-the **pipeline / API**, the **orchestrator** that runs them all and hands the chosen job to Agent 4,
+(Resume Parser)**, **Agent 2 (Job Search)**, **Agent 3 (Job Description Synthesizer + Match Scoring)**,
+**Agent 4 (Mock Interview: speech + computer vision)**,
+the **pipeline / API**, the **orchestrator** that runs Agents 1-3 and hands the chosen job to Agent 4,
 and the **HITL dashboard** (`streamlit run dashboard.py`) where the user picks that job in the browser.
 
 | Agent | Kind of AI | Model | What the model does | Fallback |
@@ -10,6 +11,7 @@ and the **HITL dashboard** (`streamlit run dashboard.py`) where the user picks t
 | Agent 1 | **NLP: named-entity recognition** (supervised, trained by us) | spaCy `en_core_web_sm`, fine-tuned on 48 annotated resumes → `models/resume_ner/` | Finds names, companies, schools, degrees, job titles, skills and dates in the resume | Rule-based parser |
 | Agent 2 | **LLM agent** (reason → act → observe loop with a search tool) | Groq `openai/gpt-oss-120b` | Decides which job searches to run and searches again if results are weak | Rule-based query from the profile |
 | Agent 3 | **Semantic embeddings / semantic search** (no LLM) | local `all-MiniLM-L6-v2` (sentence-transformers) + KeyBERT | (1) Text-similarity part of the match score; (2) key points per job: KeyBERT picks the posting's key phrases, embedding search checks each against the resume, giving fit, gaps and interview topics | TF-IDF (score), rule-based key points |
+| Agent 4 | **Computer vision + speech** (no LLM) | MediaPipe face + pose landmarks, and local Whisper `base.en` | Asks template questions, records the microphone and webcam, then measures eye contact, posture, words per minute, filler words and long pauses | Each part is optional: a missing webcam, microphone or model is reported per question and the rest still runs |
 
 Each agent uses a different kind of AI. **Agent 2 is the only LLM agent.**
 Elsewhere, LLMs are kept only as optional comparison baselines, both **off
@@ -949,6 +951,145 @@ Agent 1's or Agent 3's own fallbacks.
 
 ---
 
+## Agent 4 — Mock Interview: speech + computer vision (`agents/interview_agent.py`)
+
+Asks the candidate interview questions, records the answers (microphone + webcam), and
+measures **how** they were answered. Agent 4 is the **computer vision + speech** agent:
+**Whisper** (speech to text) and **MediaPipe** (face and body landmarks), both running on
+this computer. **No LLM**: the questions come from fixed templates, so Agent 4 stays a
+different kind of AI from Agent 2. Nothing is sent anywhere, and no API key is needed.
+
+| File | Role |
+|---|---|
+| `agents/interview_agent.py` | `run_interview(brief_path)`: the whole interview, and the command line |
+| `agents/interview_questions.py` | Reads and checks the brief, builds the 4-5 questions |
+| `agents/interview_speech.py` | Records the microphone, Whisper transcript, words per minute, filler words, long pauses |
+| `agents/interview_vision.py` | Records the webcam, MediaPipe eye contact, posture and smile |
+| `agents/interview_results.py` | Overall numbers and `output/interview_results.json` |
+
+**Run it**
+```bash
+python agents/orchestrator.py data/sample.pdf --demo      # choose a job; wait for "Interview brief for Agent 4"
+python agents/interview_agent.py                          # live: microphone + webcam
+python agents/interview_agent.py --questions-only         # just print the questions, record nothing
+python agents/interview_agent.py --audio a1.wav a2.wav --video v1.avi v2.avi   # pre-recorded answers, in question order
+```
+```python
+from interview_agent import run_interview
+results = run_interview("output/interview_brief.json")    # the same dict that is saved to output/interview_results.json
+```
+- **Only start after the orchestrator prints "Interview brief for Agent 4".** If the user quit at the job
+  choice there is no brief. Agent 4 refuses to start without one (`BriefError`), and also refuses a brief
+  that is older than the `run_trace.json` next to it (left over from an earlier run).
+- **Live:** for each question press Enter, answer out loud while looking at the camera, press Enter again
+  (limit 120 s). Recording comes first and the analysis after the last question, so there is no
+  waiting between questions. The recordings go to `recordings/<date-time>/` (git-ignored); delete the
+  folder when you no longer need it. A recorded video never leaves the computer.
+- **Pre-recorded:** `--audio` / `--video` take one file per question, in order (WAV is read directly; mp3/m4a
+  need ffmpeg). Fewer files than questions is fine (the rest count as unanswered); more is an error.
+  The given files are never changed or deleted.
+- **First use** downloads the Whisper model (`base.en`, about 140 MB) and the two MediaPipe model files
+  (about 10 MB, saved in `models/mediapipe/`, git-ignored). They need internet once, then work offline.
+  The command line exits with 1 if no question could be analysed.
+
+### The questions (`interview_questions.py`)
+4 or 5 questions, from templates filled with the brief:
+1. **Intro** with the job title and company.
+2. **Two or three questions about the job**, in this order, without repeating a topic: gaps from
+   `interview_focus` ("The posting asks for Linux, but I don't see it on your resume ..."), then the
+   resume claims from `interview_focus` ("Your resume shows Java. Walk me through a specific example ..."),
+   then `gaps` that `interview_focus` did not cover (a years gap becomes "This role asks for 3+ years ...
+   you have about 1.0"), then the candidate's first project. If the brief has too little, generic
+   questions (problem solving, teamwork, learning quickly) fill in.
+3. **Closing** ("Why should we hire you ...").
+
+### Speech (`interview_speech.py`)
+Whisper transcribes the answer with word timestamps. A short prompt makes Whisper keep "um" and "uh"
+(it drops them otherwise). Then plain Python measures:
+- **`words_per_minute`**: words ÷ the time from the first word's start to the last word's end. `null` for
+  fewer than 5 words.
+- **Filler words**: hesitations (um, uh, er, ah, hmm, ...) always count. "like", "basically", "so", "you know",
+  "I mean", "kind of", "sort of" count **only when set off** by a comma or full stop next to them or by a pause of
+  0.3 s or more ("It was, like, hard" yes; "I like Java" no).
+- **Long pauses**: a silence of **2 s or more between two words**. The silence before the first word is not a pause;
+  it is reported as `seconds_before_first_word`.
+
+### Vision (`interview_vision.py`)
+The video is analysed at 5 frames a second. For each frame MediaPipe's **Face Landmarker** (478 landmarks + blendshapes)
+and **Pose Landmarker** (33 body landmarks) give:
+- **Eye contact**: the head faces the camera (nose within 0.15 of the face's centre sideways, and within a wide
+  vertical range) **and** no eye-direction blendshape ("eye looks left / right / up / down") is above 0.45.
+  A frame with no face counts as *not* looking.
+- **Upright posture**: shoulders tilted 12° or less, neck ratio (ear-to-shoulder drop ÷ shoulder width) 0.25 or
+  more, and the nose within 0.35 shoulder widths of the shoulders' middle. Only frames where the shoulders and
+  ears are visible count.
+- **Smile**: the two mouth-corner blendshapes average 0.4 or more.
+
+**These are heuristics on landmarks, not a trained eye-contact classifier**, and the thresholds are named constants at the
+top of `interview_vision.py`. They were chosen from typical face and body proportions and tested on made-up landmarks,
+**not** calibrated on real recordings: record yourself looking at the camera, looking away, sitting upright and
+slouching, and adjust them before trusting the percentages. Webcam height and distance change the numbers.
+
+### Output format — `output/interview_results.json` (git-ignored)
+Written when the interview ends; the previous file is deleted when a run starts. This is the contract with the
+scorecard / feedback page (`results_version` changes if the format does).
+```json
+{
+  "results_version": 1,
+  "created": "2026-11-18T08:39:53",
+  "mode": "live",
+  "brief": {"path": "interview_brief.json", "created": "2026-11-18T09:00:00"},
+  "job": {"id": "jsearch-abc", "title": "Junior Java Developer", "company": "Maplewood Software"},
+  "questions": [
+    {
+      "id": 2, "kind": "gap", "topic": "Linux", "source": "interview_focus",
+      "question": "The posting asks for Linux, but I don't see it on your resume. ...",
+      "answered": true,
+      "answer_seconds": 41.2,
+      "speech": {
+        "transcript": "I built a tool, um, with Java and Git ...",
+        "duration_seconds": 41.2, "word_count": 96, "speaking_seconds": 38.0,
+        "words_per_minute": 151.6,
+        "filler_count": 3, "filler_rate_per_100_words": 3.1, "fillers": {"um": 2, "like": 1},
+        "long_pause_count": 1, "long_pauses": [{"start": 12.4, "end": 15.1, "seconds": 2.7}],
+        "seconds_before_first_word": 1.3
+      },
+      "vision": {
+        "duration_seconds": 41.2, "frames_analyzed": 206,
+        "face_detected_percent": 98.5, "eye_contact_percent": 72.3, "longest_look_away_seconds": 4.2,
+        "pose_detected_percent": 100.0, "posture_upright_percent": 88.4,
+        "average_shoulder_tilt_degrees": 3.1, "smile_percent": 12.0
+      },
+      "errors": [],
+      "recordings": {"audio": "recordings/20261118-084000/q2.wav", "video": "recordings/20261118-084000/q2.avi"}
+    }
+  ],
+  "overall": {
+    "questions_total": 5, "questions_answered": 5,
+    "speech": {"answers_analyzed": 5, "total_words": 480, "words_per_minute": 148.2, "filler_count": 14,
+               "filler_rate_per_100_words": 2.9, "fillers": {"um": 9, "like": 5}, "long_pause_count": 3,
+               "average_answer_seconds": 39.5},
+    "vision": {"answers_analyzed": 5, "frames_analyzed": 1010, "face_detected_percent": 97.0,
+               "eye_contact_percent": 70.1, "longest_look_away_seconds": 6.8,
+               "posture_upright_percent": 85.2, "smile_percent": 9.5}
+  },
+  "settings": {"whisper_model": "base.en", "long_pause_seconds": 2.0, "video_analysis_fps": 5}
+}
+```
+- Each question keeps `id`, `kind` (`intro`, `gap`, `claim`, `experience`, `project`, `general`, `closing`), `topic`,
+  `source` and `question` from the question builder.
+- `speech` / `vision` are `null` when that part didn't run, with the reason in `errors` (for example
+  `"vision: Could not open the webcam."`). A broken webcam or microphone never stops the interview, and
+  `answered` is true if at least one of the two produced results. A silent answer is *answered*, with `word_count` 0.
+- Percentages are `null` when too few frames were analysed (under 3) to say anything; `posture_upright_percent` is `null`
+  when the body was never visible; `words_per_minute` is `null` under 5 words.
+- `overall.speech.words_per_minute` is all words ÷ all speaking time. `overall.vision` percentages average the answers,
+  each weighted by its frames analysed. `longest_look_away_seconds` is the maximum.
+- The file contains the transcripts (the candidate's own words) but no name, email, phone or links: the brief has none.
+  `recordings` points at the audio and video files, which are in the git-ignored `recordings/` folder.
+
+---
+
 ## Tests
 
 ```bash
@@ -979,11 +1120,17 @@ see the **Actions** tab on GitHub, or the ✓ / ✗ next to each commit.
 | `tests/test_job_search.py` | Agent 2 toolkit: job format, cleaning, duplicates, limits, `build_query`, `usable_titles` (a name-as-title entry, `experience: []`, incomplete entries skipped, a normal entry kept) |
 | `tests/test_jsearch_provider.py` | JSearch provider with a fake HTTP call: request building, result parsing, error cases with their HTTP status, `last_request` (status, raw count, cache hits), key never in error messages; query cache in a temp folder: a hit skips the request, expired entries are refreshed, errors and empty results aren't cached, a corrupt file is ignored, `cache_path=None` turns it off |
 | `tests/test_search_endpoint.py` | `POST /search`: NER parser used, success, fallback, empty results, bad input (file type, `limit`, `max_steps`), `max_steps` default and pass-through, 502 on job source failure |
+| `tests/test_interview_questions.py` | Agent 4 brief reading (missing, unreadable, wrong version, no title, stale against `run_trace.json`) and the template questions (4-5 of them, gaps before claims, years gap with the candidate's years, project question, generic fill-in, custom role, no LLM called) |
+| `tests/test_interview_speech.py` | Agent 4 speech with a synthetic WAV, a fake Whisper model and a fake microphone: WAV reading/resampling, recording, Whisper words and the filler-keeping prompt, filler rules (hesitations, "like" only when set off, two-word fillers), long pauses at the threshold, words per minute, silence, errors |
+| `tests/test_interview_vision.py` | Agent 4 vision with made-up landmarks, a fake camera, a tiny synthetic video and scripted fake detectors: eye contact (head turned, looking up/down, eyes turned), smile, posture (hunched, tilted, leaning, not visible), the summary percentages and "too few frames" cases, recording at real-time length, frame sampling, increasing MediaPipe timestamps, detectors always closed, model download and its failure message |
+| `tests/test_interview_results.py` | Overall speech and vision numbers (pace from total words and time, frame-weighted percentages, missing parts), results document shape, atomic save, old results removed |
+| `tests/test_interview_agent.py` | The whole interview with fake devices: live flow, both devices recording at the same time, time limit and Enter to stop, a failing webcam / microphone / Whisper recorded per question, pre-recorded files (partial, `None`, missing file, too many), no stale results, no brief, the command line and its exit codes |
 
 **Tests never call a real LLM or job site, or load the real embedding model.**
 `tests/conftest.py` blocks the network function in `agents/llm.py`, the
 model loader in `agents/embeddings.py`, KeyBERT in `agents/keypoints.py` and
-the NER loader in `agents/resume_parser.py` for every test. Tests that need
+the NER loader in `agents/resume_parser.py`, and Agent 4's Whisper loader, microphone, webcam and MediaPipe loader
+(`agents/interview_speech.py`, `agents/interview_vision.py`) for every test. Tests that need
 a reply, an embedding or entities install a fake one. The suite runs
 offline, without API keys, and downloads nothing. The NER model is committed
 in git, so the tests that load the real NER model always run, and they fail
@@ -992,7 +1139,7 @@ if it's missing or broken.
 All test data is fake: `tests/fixtures/` holds invented resumes (rebuild
 them with `python tests/fixtures/make_fixtures.py`) and invented job postings.
 The one test that uses `data/sample.pdf` is skipped when that file is missing.
-Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
+Real resumes (`data/*.pdf`, `data/*.docx`), `output/`, `recordings/` and the MediaPipe model files (`*.task`) are git-ignored.
 
 ---
 
@@ -1160,6 +1307,32 @@ Real resumes (`data/*.pdf`, `data/*.docx`) and `output/` are git-ignored.
   process", "comprehensive benefits package"). A key point that is only the
   company's name is dropped, but one that contains it ("Epic customers") or a
   short form of it ("Louisiana Blue") is kept.
+
+**Agent 4, mock interview (Whisper + MediaPipe)**
+- **The vision thresholds are not calibrated.** Eye contact and posture are heuristics on landmarks (see Agent 4),
+  tested on made-up landmarks and fake detectors; the real MediaPipe and Whisper models are never run by the tests
+  (they need downloads). Check the percentages on your own recordings before trusting them, and keep the camera at
+  eye level, about an arm's length away, with the face and both shoulders in the picture.
+- **Looking at the screen is not looking at the camera.** On a laptop the webcam sits above the screen, so a candidate
+  reading the screen reads as "looking away" when the head is tilted down. The vertical range is deliberately wide to
+  allow for it.
+- **One person, one camera.** Only the first face and body found are used. Dark rooms, backlight or a face partly
+  out of the picture lower `face_detected_percent`, and those frames count as not looking.
+- **Whisper can miss fillers and mishear.** The prompt that keeps "um" and "uh" helps but does not guarantee it, so
+  the filler count is a lower bound. `base.en` is English only and makes more mistakes with accents or noise than
+  the larger models (change `SPEECH_CONFIG["model"]`; `small.en` is about 3x slower). Word timings can drift by a
+  fraction of a second, which matters little for 2-second pauses.
+- **The "like" / "so" / "you know" rule is word-based**: a real "like" with a comma next to it ("Pizza, like pasta,
+  is good") counts as a filler, and a filler said without a comma or pause is missed.
+- **Analysis happens after the last question**, so the wait at the end grows with the length of the answers (Whisper
+  on the CPU plus MediaPipe on 5 frames a second). The speed was not measured in the tests; time one real run on the
+  demo laptop before the demo.
+- **The microphone and webcam are used at the same time; the video starts a fraction of a second apart from the audio.**
+  The time limit per answer is 120 s.
+- **The brief is trusted for its content.** Agent 4 checks the version, the job title and that the brief is not older
+  than the latest orchestrator run, but not that the questions make sense for the job.
+- **No audio or video is kept in the results file**, only the metrics, the transcripts and the path of the recording.
+  The orchestrator does not call Agent 4 by itself yet: run `python agents/interview_agent.py` after the job choice.
 
 **Orchestrator**
 - **`--demo` replays the jobs of the last real run** (or the newest cache

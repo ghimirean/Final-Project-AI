@@ -231,6 +231,7 @@ def analyze_words(words, duration_seconds):
         "transcript": transcript,
         "duration_seconds": duration,
         "word_count": word_count,
+        "speaking_seconds": round(speaking, 2),      # first word's start to last word's end
         "words_per_minute": pace,
         "filler_count": len(fillers),
         "filler_rate_per_100_words": round(100 * len(fillers) / word_count, 1) if word_count else 0.0,

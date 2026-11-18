@@ -152,17 +152,17 @@ def test_every_question_has_the_fields_the_next_steps_need():
         assert q["question"].strip()
 
 
-# ---------- run_interview ----------
+# ---------- build_interview (the questions part of run_interview) ----------
 
-def test_run_interview_returns_job_and_questions(tmp_path):
-    result = interview_agent.run_interview(write(tmp_path, make_brief()))
+def test_build_interview_returns_job_and_questions(tmp_path):
+    result = interview_agent.build_interview(write(tmp_path, make_brief()))
     assert result["job"] == {"id": "job-1", "title": "Junior Java Developer", "company": "Maplewood Software"}
     assert 4 <= len(result["questions"]) <= 5
 
 
-def test_run_interview_without_a_brief_raises(tmp_path):
+def test_build_interview_without_a_brief_raises(tmp_path):
     with pytest.raises(BriefError):
-        interview_agent.run_interview(str(tmp_path / "missing.json"))
+        interview_agent.build_interview(str(tmp_path / "missing.json"))
 
 
 def test_command_line_prints_questions_or_a_clear_error(tmp_path, capsys):
@@ -170,3 +170,10 @@ def test_command_line_prints_questions_or_a_clear_error(tmp_path, capsys):
     assert "Q1 [intro]" in capsys.readouterr().out
     assert interview_agent.main(["--brief", str(tmp_path / "missing.json")]) == 1
     assert "Agent 4 cannot start" in capsys.readouterr().err
+
+
+def test_years_question_takes_the_candidate_years_from_the_gaps():
+    brief = make_brief(interview_focus=["3+ years of experience (asked for, not on the resume)"],
+                       gaps=["3+ years of experience (candidate has 1.0)"])
+    experience = next(q for q in build_questions(brief) if q["kind"] == "experience")
+    assert "3+ years" in experience["question"] and "about 1.0" in experience["question"]

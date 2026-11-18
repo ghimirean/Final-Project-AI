@@ -207,7 +207,7 @@ def test_silence_before_the_first_word_is_not_a_pause():
 def test_analyze_words_numbers():
     words = sentence("I built a small tool, um, and it worked well", step=0.5)    # 10 words, 0.0 -> 4.85 s
     r = analyze_words(words, 6.0)
-    assert r["word_count"] == 10
+    assert r["word_count"] == 10 and r["speaking_seconds"] == 4.85
     assert r["words_per_minute"] == pytest.approx(10 / (4.85 / 60), abs=0.1)
     assert r["filler_count"] == 1 and r["fillers"] == {"um": 1}
     assert r["filler_rate_per_100_words"] == 10.0

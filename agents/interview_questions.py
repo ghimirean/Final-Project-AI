@@ -107,7 +107,14 @@ def parse_focus_item(item, gaps):
         kind = "gap" if topic.lower() in {clean_topic(g).lower() for g in gaps} else "claim"
     years = YEARS_GAP.search(item)
     if years:
-        return {"kind": "experience", "topic": topic, "detail": years.groupdict()}
+        detail = years.groupdict()
+        if not detail["has"]:                      # the number the candidate has is in the matching gaps entry
+            for gap in gaps:
+                found = YEARS_GAP.search(str(gap))
+                if found and found["needed"] == detail["needed"] and found["has"]:
+                    detail["has"] = found["has"]
+                    break
+        return {"kind": "experience", "topic": topic, "detail": detail}
     return {"kind": kind, "topic": topic, "detail": None} if topic else None
 
 
