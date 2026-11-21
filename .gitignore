@@ -6,3 +6,5 @@ data/*.docx
 output/
 .env
 .venv/
+recordings/
+*.task

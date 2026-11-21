@@ -5,7 +5,7 @@
     Agent 2  job search          generative LLM + JSearch tool  -> job postings
     Agent 3  ranking/key points  semantic embeddings (MiniLM)   -> ranked jobs
     HITL     the user picks one job (choose_job callback)
-    Agent 4  interview           computer vision + speech       <- handoff
+    Agent 4  interview           computer vision + speech       <- handoff (--interview runs it)
 
     from orchestrator import run_intervai
     result = run_intervai("data/sample.pdf", "Monroe, LA", choose_job=my_callback)
@@ -70,7 +70,7 @@ STAGES = {
     "hitl": {"agent": "Human in the loop: job choice", "kind_of_ai": "human decision",
              "model": None},
     "agent4": {"agent": "Agent 4: interview (handoff)", "kind_of_ai": "computer vision + speech",
-               "model": "MediaPipe + Whisper (Agent 4, separate module)"},
+               "model": "MediaPipe + Whisper (agents/interview_agent.py, started with --interview)"},
 }
 
 
@@ -534,6 +534,31 @@ def print_trace(path):
                       + (f"  ERROR: {r['error']}" if "error" in r else ""))
 
 
+def start_agent4(result, requested):
+    """Agent 4 (the mock interview). Starts only when the user asked for it (--interview) AND chose a
+    job in THIS run: after a Quit there is no new brief, and an old one must never be used.
+    Agent 4 is imported here, so Agents 1-3 don't need Whisper or MediaPipe installed.
+    Returns Agent 4's results, or None if it did not run."""
+    if not requested:
+        return None
+    if not result.get("selected"):
+        print("No job chosen: the interview was not started.")
+        return None
+    try:
+        from interview_agent import InterviewError, print_summary, run_interview
+        from interview_questions import BriefError
+    except ImportError as e:
+        warn(f"Agent 4 could not be loaded ({e}). Run: pip install -r requirements.txt")
+        return None
+    try:
+        results = run_interview(result["handoff"]["brief"])
+    except (BriefError, InterviewError) as e:
+        warn(f"Agent 4 could not start: {e}")
+        return None
+    print_summary(results)
+    return results
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the INTERVAI agents end to end.")
     parser.add_argument("resume", nargs="?", default=os.path.join(ROOT, "data", "sample.pdf"))
@@ -547,6 +572,8 @@ if __name__ == "__main__":
                         help=f"Agent 2 search steps, each at most one JSearch request (default {MAX_STEPS})")
     parser.add_argument("--auto", action="store_true",
                         help="pick the top job without asking (for scripted runs)")
+    parser.add_argument("--interview", action="store_true",
+                        help="after the job choice, run Agent 4: the mock interview with microphone and webcam")
     args = parser.parse_args()
 
     chooser = choose_top_job if args.auto else make_terminal_chooser()
@@ -562,3 +589,4 @@ if __name__ == "__main__":
     print_trace(result["trace_path"])
     print(f"\nTrace saved to {os.path.relpath(result['trace_path'], ROOT)}")
     print(f"Ranked jobs saved to {os.path.relpath(result['ranked_path'], ROOT)}")
+    start_agent4(result, args.interview)
