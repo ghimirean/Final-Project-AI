@@ -90,10 +90,40 @@ def clean_topic(text):
     return text[:MAX_TOPIC_CHARS].rstrip()
 
 
-def parse_focus_item(item, gaps):
+# Agent 3's evidence after "resume:" is "skills: Java, Git" for skills, or a
+# free-text resume line for other phrases ("Rank: 1/39 GPA: ...").
+EVIDENCE = re.compile(r"resume:\s*(?P<evidence>.*)$", re.IGNORECASE | re.DOTALL)
+GROUNDED_EVIDENCE = re.compile(r"^\s*(?:skills|projects?)\s*:", re.IGNORECASE)
+
+
+def resume_topics(candidate):
+    """The candidate's skills, project names and project skills, lower case."""
+    candidate = candidate or {}
+    topics = {clean_topic(s).lower() for s in candidate.get("skills") or []}
+    for project in candidate.get("projects") or []:
+        project = project or {}
+        topics.add(clean_topic(project.get("name")).lower())
+        topics |= {clean_topic(s).lower() for s in project.get("skills") or []}
+    topics.discard("")
+    return topics
+
+
+def is_grounded(topic, note, candidate):
+    """A "your resume shows ..." question needs a topic that really is on the
+    resume: one of the candidate's skills, a project name or a project skill
+    (whole phrase, case-insensitive), or evidence from the resume's skills or
+    projects section. A phrase backed only by a free-text resume line is not."""
+    if topic.lower() in resume_topics(candidate):
+        return True
+    evidence = EVIDENCE.search(note or "")
+    return bool(evidence and GROUNDED_EVIDENCE.match(evidence["evidence"]))
+
+
+def parse_focus_item(item, gaps, candidate=None):
     """One interview_focus item -> {"kind", "topic", "detail"} or None.
     kind: "gap" (asked for, not on the resume), "claim" (on the resume, ask
-    for an example), "experience" (years gap)."""
+    for an example), "experience" (years gap). A claim whose topic isn't a
+    skill or project on the resume (see is_grounded) gives None: skipped."""
     item = str(item or "").strip()
     if not item or GENERAL_FIT.match(item):
         return None
@@ -102,7 +132,7 @@ def parse_focus_item(item, gaps):
         topic, note = clean_topic(match["topic"]), match["note"]
         kind = "gap" if note.startswith("asked for") else "claim"
     else:
-        topic = clean_topic(re.sub(r"\s*\(.*$", "", item, flags=re.DOTALL) or item)
+        topic, note = clean_topic(re.sub(r"\s*\(.*$", "", item, flags=re.DOTALL) or item), None
         # a bare name (rule-based fallback): it is a gap if Agent 3 lists it as one
         kind = "gap" if topic.lower() in {clean_topic(g).lower() for g in gaps} else "claim"
     years = YEARS_GAP.search(item)
@@ -115,6 +145,8 @@ def parse_focus_item(item, gaps):
                     detail["has"] = found["has"]
                     break
         return {"kind": "experience", "topic": topic, "detail": detail}
+    if kind == "claim" and not is_grounded(topic, note, candidate):
+        return None
     return {"kind": kind, "topic": topic, "detail": None} if topic else None
 
 
@@ -183,7 +215,8 @@ def build_questions(brief):
             content.append(dict(item, source=source))
 
     for focus in job.get("interview_focus") or []:
-        add(parse_focus_item(focus, gaps), "interview_focus")
+        # an ungrounded claim is None: skipped, not counted toward the limit
+        add(parse_focus_item(focus, gaps, candidate), "interview_focus")
     for gap in gaps:
         add(parse_gap_item(gap), "gaps")
     add(project_item(candidate), "projects")
