@@ -10,6 +10,7 @@ only a front end: no question, recording or analysis logic is duplicated.
 Streamlit reruns this whole script on every click, so everything about the
 interview lives in st.session_state.
 """
+import json
 import os
 import re
 import sys
@@ -22,7 +23,7 @@ from interview_agent import (MAX_ANSWER_SECONDS, OUTPUT_DIR, analyse_and_save,  
                              build_interview, new_answer)
 from interview_questions import BriefError  # noqa: E402
 from interview_recorder import AnswerRecorder, new_recordings_dir  # noqa: E402
-from interview_results import remove_old_results  # noqa: E402
+from interview_results import RESULTS_FILENAME, remove_old_results  # noqa: E402
 
 BRIEF_NAME = "interview_brief.json"
 
@@ -83,6 +84,17 @@ def button_states(phase):
     return {"start": phase == READY, "stop": phase == RECORDING, "next": phase == STOPPED}
 
 
+SESSION_KEYS = ("interview", "started", "index", "phase", "recorder", "answers", "created", "finished",
+                "keep_recordings", "analysis_started", "analysis_error", "results", "recordings_note",
+                "recordings_dir", "keep_choice")
+
+
+def clear_session(session):
+    """Back to the start page: forgets this interview (results stay in the file)."""
+    for key in SESSION_KEYS:
+        session.pop(key, None)
+
+
 def new_session(interview, folder=None, keep_recordings=False):
     """The st.session_state values for a freshly started interview."""
     return {"interview": interview, "started": True, "index": 0, "phase": READY,
@@ -108,6 +120,48 @@ def build_answers(questions, recorded):
     by_id = {r["id"]: r for r in recorded}
     return [new_answer(q, {k: by_id[q["id"]][k] for k in ("audio", "video", "errors")})
             for q in questions if q["id"] in by_id]
+
+
+def load_results(path=None):
+    """output/interview_results.json as a dict, or None if it is missing or unreadable."""
+    try:
+        with open(path or os.path.join(output_dir(), RESULTS_FILENAME), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def show_number(value, unit="", decimals=0):
+    """A metric value for display: "n/a" when Agent 4 couldn't measure it (None)."""
+    if value is None:
+        return "n/a"
+    return f"{value:.{decimals}f}{unit}"
+
+
+def overall_metrics(results):
+    """The scorecard's top row: (label, value) pairs, "n/a" where not measured."""
+    overall = results.get("overall") or {}
+    speech, vision = overall.get("speech") or {}, overall.get("vision") or {}
+    return [("Words per minute", show_number(speech.get("words_per_minute"))),
+            ("Filler words", show_number(speech.get("filler_count"))),
+            ("Long pauses", show_number(speech.get("long_pause_count"))),
+            ("Eye contact", show_number(vision.get("eye_contact_percent"), "%")),
+            ("Upright posture", show_number(vision.get("posture_upright_percent"), "%")),
+            ("Smiling", show_number(vision.get("smile_percent"), "%"))]
+
+
+def question_metrics(question):
+    """One answer's numbers as (label, value) pairs, "n/a" where not measured."""
+    speech, vision = question.get("speech") or {}, question.get("vision") or {}
+    return [("Answer length", show_number(question.get("answer_seconds"), " s")),
+            ("Words", show_number(speech.get("word_count"))),
+            ("Words per minute", show_number(speech.get("words_per_minute"))),
+            ("Filler words", show_number(speech.get("filler_count"))),
+            ("Long pauses", show_number(speech.get("long_pause_count"))),
+            ("Eye contact", show_number(vision.get("eye_contact_percent"), "%")),
+            ("Upright posture", show_number(vision.get("posture_upright_percent"), "%")),
+            ("Smiling", show_number(vision.get("smile_percent"), "%"))]
 
 
 def recordings_note(lines):
@@ -221,8 +275,9 @@ def results_page():
     s = st.session_state
     if s["analysis_error"]:
         st.error(f"Your answers could not be analysed. ({s['analysis_error']})")
+        interview_again_button()
         return
-    results = s["results"]
+    results = load_results() or s["results"]     # the saved file is the source of the scorecard
     overall = results["overall"]
     answered, total = overall["questions_answered"], overall["questions_total"]
     if answered:
@@ -235,6 +290,40 @@ def results_page():
             st.caption(f"Question {q['id']}: {problem}")
     if s["recordings_note"]:
         st.caption(s["recordings_note"])
+    if answered:
+        scorecard(results)
+    interview_again_button()
+
+
+def scorecard(results):
+    st.subheader("Your scorecard")
+    metrics = overall_metrics(results)
+    for row in (metrics[:3], metrics[3:]):
+        for col, (label, value) in zip(st.columns(3), row):
+            col.metric(label, value)
+    st.caption("Eye contact, posture and smile are heuristics on face and body landmarks "
+               "(MediaPipe), not a trained classifier. They depend on where the camera is and how "
+               "far away you sit, so treat them as rough guides.")
+    for q in results["questions"]:
+        label = f"Question {q['id']}" + ("" if q.get("answered") else " (not analysed)")
+        with st.expander(label):
+            st.text(q.get("question") or "")                  # plain text, never HTML or markdown
+            speech = q.get("speech") or {}
+            st.caption("Transcript")
+            transcript = speech.get("transcript")
+            st.text(transcript if transcript else "No transcript.")
+            numbers = question_metrics(q)
+            for row in (numbers[:4], numbers[4:]):
+                for col, (name, value) in zip(st.columns(4), row):
+                    col.metric(name, value)
+            for problem in device_problems(q.get("errors") or []):
+                st.caption(problem)
+
+
+def interview_again_button():
+    if st.button("Interview again"):
+        clear_session(st.session_state)
+        st.rerun()
 
 
 def main():
