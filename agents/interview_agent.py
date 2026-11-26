@@ -156,8 +156,6 @@ def run_interview(brief_path=DEFAULT_BRIEF, audio_files=None, video_files=None, 
         say(f"\nMock interview for {job['title']}" + (f" at {job['company']}" if job["company"] else "")
             + f": {len(questions)} questions. Your answers are recorded on this computer only.")
     for index, q in enumerate(questions):
-        answer = dict(q, answered=False, answer_seconds=None, speech=None, vision=None, errors=[],
-                      recordings={"audio": None, "video": None})
         if mode == "live":
             say(f"\nQuestion {q['id']} of {len(questions)}: {q['question']}")
             planned = [os.path.join(recordings_dir, f"q{q['id']}.{ext}") for ext in ("wav", "avi")]
@@ -169,13 +167,40 @@ def run_interview(brief_path=DEFAULT_BRIEF, audio_files=None, video_files=None, 
         else:
             got = {"audio": audio_files[index] if index < len(audio_files) else None,
                    "video": video_files[index] if index < len(video_files) else None, "errors": []}
-        answer["recordings"] = {"audio": _rel(got["audio"]), "video": _rel(got["video"])}
-        answer["errors"] = list(got["errors"])
-        answer["_files"] = got
-        answers.append(answer)
+        answers.append(new_answer(q, got))
 
+    return analyse_and_save(answers, brief, brief_path, mode, recordings_dir, keep_recordings,
+                            created=created, say=say)
+
+
+def new_answer(question, got):
+    """One answer before analysis: the question's fields + the recorded or given
+    files (`got` = {"audio", "video", "errors"}, as record_answer returns)."""
+    return dict(question, answered=False, answer_seconds=None, speech=None, vision=None,
+                errors=list(got["errors"]),
+                recordings={"audio": _rel(got["audio"]), "video": _rel(got["video"])},
+                _files=got)
+
+
+def analyse_and_save(answers, brief, brief_path, mode, recordings_dir=None, keep_recordings=False,
+                     created=None, say=print, on_answer=None):
+    """Analyses the answers (new_answer() dicts, in question order) with Whisper and
+    MediaPipe, builds the results, saves interview_results.json next to the brief and
+    applies the recordings policy: in live mode the files recorded in this run are
+    deleted after analysis (their paths become null) unless keep_recordings.
+    Returns the results dict.
+
+    created: the files this run recorded, the only ones that are ever deleted
+    (default: the answers' own recorded files). on_answer(number, total) is
+    called before each answer is analysed (for a progress display)."""
+    out_dir = os.path.dirname(os.path.abspath(brief_path))
+    if created is None:
+        created = [p for a in answers for p in (a["_files"]["audio"], a["_files"]["video"]) if p] \
+            if mode == "live" else []
     say("\nAnalysing your answers...")
-    for answer in answers:
+    for number, answer in enumerate(answers, start=1):
+        if on_answer:
+            on_answer(number, len(answers))
         files = answer.pop("_files")
         if files["audio"]:
             try:

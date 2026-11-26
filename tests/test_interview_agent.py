@@ -395,3 +395,37 @@ def test_command_line_keep_recordings_flag(brief, monkeypatch):
     assert seen["keep_recordings"] is False
     assert interview_agent.main(["--brief", brief, "--keep-recordings"]) == 0
     assert seen["keep_recordings"] is True
+
+
+# ---------- analyse_and_save: the analysis + saving part of run_interview ----------
+
+def test_analyse_and_save_with_fake_analysers(brief, tmp_path, monkeypatch):
+    monkeypatch.setattr(interview_speech, "analyze_audio",
+                        lambda path: {"duration_seconds": 2.0, "word_count": 7, "words_per_minute": 150.0,
+                                      "filler_count": 1, "fillers": {"um": 1}, "long_pause_count": 0,
+                                      "speaking_seconds": 2.0})
+    monkeypatch.setattr(interview_vision, "analyze_video", lambda path: dict(VISION))
+    rec = tmp_path / "rec"
+    rec.mkdir()
+    audio, video = rec / "q1.wav", rec / "q1.avi"
+    audio.write_bytes(b"a")
+    video.write_bytes(b"v")
+    loaded = interview_agent.build_interview(brief)
+    questions = loaded["questions"]
+    answers = [interview_agent.new_answer(questions[0], {"audio": str(audio), "video": str(video), "errors": []}),
+               interview_agent.new_answer(questions[1], {"audio": None, "video": None,
+                                                         "errors": ["speech: no microphone"]})]
+    progress, said = [], []
+    results = interview_agent.analyse_and_save(answers, loaded["brief"], brief, "live", str(rec),
+                                               keep_recordings=False, say=said.append,
+                                               on_answer=lambda n, total: progress.append((n, total)))
+    assert progress == [(1, 2), (2, 2)]
+    first, second = results["questions"]
+    assert first["answered"] and first["speech"]["word_count"] == 7 and first["vision"]["eye_contact_percent"] == 80.0
+    assert first["answer_seconds"] == 3.0                               # the longer of speech (2.0) and vision (3.0)
+    assert second["answered"] is False and second["errors"] == ["speech: no microphone"]
+    assert "_files" not in first and results["overall"]["questions_answered"] == 1
+    assert results_file(brief) == json.loads(json.dumps(results))        # saved next to the brief
+    assert not rec.exists()                                              # recordings policy applied: deleted
+    assert first["recordings"] == {"audio": None, "video": None}
+    assert said[-1] == "Recordings deleted."
