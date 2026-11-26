@@ -38,6 +38,7 @@ MODES = {
 }
 LIVE_DEFAULT_STEPS = 1
 CUSTOM = "custom"          # the choice value for "a role that isn't in the list"
+INTERVIEW_PAGE = "pages/interview.py"   # the mock interview (interview_ui.py), opened after Confirm
 
 
 # ---------- non-UI logic (plain functions, tested without Streamlit) ----------
@@ -372,7 +373,9 @@ def result_view(summary):
                    f"{md(summary['company'] or 'custom role')} "
                    f"(score {float(summary['score'] or 0):.1f}).")
         st.markdown(f"Interview brief for Agent 4: `{summary['brief']}`")
-    else:
+        if st.button("Go to the mock interview", type="primary"):
+            st.switch_page(INTERVIEW_PAGE)
+    else:                                   # Quit: no brief, so no interview is offered
         st.info("Stopped without choosing a job: no interview brief was written.")
     st.markdown(f"Run trace: `{summary['trace']}`")
     if st.button("Start over"):
