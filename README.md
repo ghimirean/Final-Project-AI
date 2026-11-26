@@ -976,8 +976,10 @@ different kind of AI from Agent 2. Nothing is sent anywhere, and no API key is n
 **Run it**
 ```bash
 python agents/orchestrator.py data/sample.pdf --demo --interview   # the whole app: Agents 1-3, job choice, then the interview
+python agents/orchestrator.py data/sample.pdf --demo --interview --keep-recordings   # ...and keep the audio + video
 python agents/orchestrator.py data/sample.pdf --demo      # or: choose a job and wait for "Interview brief for Agent 4"...
 python agents/interview_agent.py                          # ...then run the interview alone: microphone + webcam
+python agents/interview_agent.py --keep-recordings        # the same, but keep the audio + video afterwards
 python agents/interview_agent.py --questions-only         # just print the questions, record nothing
 python agents/interview_agent.py --audio a1.wav a2.wav --video v1.avi v2.avi   # pre-recorded answers, in question order
 ```
@@ -990,8 +992,14 @@ results = run_interview("output/interview_brief.json")    # the same dict that i
   that is older than the `run_trace.json` next to it (left over from an earlier run).
 - **Live:** for each question press Enter, answer out loud while looking at the camera, press Enter again
   (limit 120 s). Recording comes first and the analysis after the last question, so there is no
-  waiting between questions. The recordings go to `recordings/<date-time>/` (git-ignored); delete the
-  folder when you no longer need it. A recorded video never leaves the computer.
+  waiting between questions. The recordings go to `recordings/<date-time>/` (git-ignored) and are
+  **deleted once the answers are analysed and the results are saved** (the folder too, if it is then empty).
+  Their `recordings` paths in `interview_results.json` are then `null`, and the last line says
+  "Recordings deleted." With `--keep-recordings` (`run_interview(..., keep_recordings=True)`) they are kept,
+  their paths stay in the results, and the last line says "Recordings kept in recordings/<date-time>";
+  delete that folder yourself when you no longer need it. Only files recorded in this run are ever deleted,
+  never anything else in the folder or outside it, and nothing is deleted if the interview stops early
+  (for example with no usable brief). A recorded video never leaves the computer.
 - **Pre-recorded:** `--audio` / `--video` take one file per question, in order (WAV is read directly; mp3/m4a
   need ffmpeg). Fewer files than questions is fine (the rest count as unanswered); more is an error.
   The given files are never changed or deleted.
@@ -1099,7 +1107,9 @@ scorecard / feedback page (`results_version` changes if the format does).
 - `overall.speech.words_per_minute` is all words ÷ all speaking time. `overall.vision` percentages average the answers,
   each weighted by its frames analysed. `longest_look_away_seconds` is the maximum.
 - The file contains the transcripts (the candidate's own words) but no name, email, phone or links: the brief has none.
-  `recordings` points at the audio and video files, which are in the git-ignored `recordings/` folder.
+  `recordings` points at the audio and video files, which are in the git-ignored `recordings/` folder; in live
+  mode both paths are `null` after the recordings are deleted (the default; see `--keep-recordings`).
+  Pre-recorded runs (`"mode": "files"`) keep the paths of the files you gave.
 
 ---
 

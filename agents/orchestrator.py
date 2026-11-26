@@ -534,10 +534,11 @@ def print_trace(path):
                       + (f"  ERROR: {r['error']}" if "error" in r else ""))
 
 
-def start_agent4(result, requested):
+def start_agent4(result, requested, keep_recordings=False):
     """Agent 4 (the mock interview). Starts only when the user asked for it (--interview) AND chose a
     job in THIS run: after a Quit there is no new brief, and an old one must never be used.
     Agent 4 is imported here, so Agents 1-3 don't need Whisper or MediaPipe installed.
+    keep_recordings (--keep-recordings) keeps the interview's audio and video after analysis.
     Returns Agent 4's results, or None if it did not run."""
     if not requested:
         return None
@@ -551,7 +552,7 @@ def start_agent4(result, requested):
         warn(f"Agent 4 could not be loaded ({e}). Run: pip install -r requirements.txt")
         return None
     try:
-        results = run_interview(result["handoff"]["brief"])
+        results = run_interview(result["handoff"]["brief"], keep_recordings=keep_recordings)
     except (BriefError, InterviewError) as e:
         warn(f"Agent 4 could not start: {e}")
         return None
@@ -574,6 +575,9 @@ if __name__ == "__main__":
                         help="pick the top job without asking (for scripted runs)")
     parser.add_argument("--interview", action="store_true",
                         help="after the job choice, run Agent 4: the mock interview with microphone and webcam")
+    parser.add_argument("--keep-recordings", action="store_true",
+                        help="with --interview: keep the interview's audio and video in recordings/ "
+                             "(deleted after analysis by default)")
     args = parser.parse_args()
 
     chooser = choose_top_job if args.auto else make_terminal_chooser()
@@ -589,4 +593,4 @@ if __name__ == "__main__":
     print_trace(result["trace_path"])
     print(f"\nTrace saved to {os.path.relpath(result['trace_path'], ROOT)}")
     print(f"Ranked jobs saved to {os.path.relpath(result['ranked_path'], ROOT)}")
-    start_agent4(result, args.interview)
+    start_agent4(result, args.interview, keep_recordings=args.keep_recordings)

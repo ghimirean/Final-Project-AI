@@ -90,7 +90,8 @@ def enter_log():
 def test_live_interview_end_to_end(brief, tmp_path, devices):
     prompts, press_enter = enter_log()
     said = []
-    results = run_interview(brief, recordings_dir=str(tmp_path / "rec"), wait_for_enter=press_enter, say=said.append)
+    results = run_interview(brief, recordings_dir=str(tmp_path / "rec"), wait_for_enter=press_enter, say=said.append,
+                            keep_recordings=True)
     n = results["overall"]["questions_total"]
     assert 4 <= n <= 5 and results["overall"]["questions_answered"] == n and results["mode"] == "live"
     assert len(prompts) == 2 * n                                     # one Enter to start, one to stop, per question
@@ -282,3 +283,115 @@ def test_command_line_exits_1_when_no_answer_could_be_analysed(brief, tmp_path, 
     assert interview_agent.main(["--brief", brief, "--audio", audio]) == 1          # conftest: Whisper is unavailable
     out = capsys.readouterr().out
     assert "Answered 0 of" in out and "Question 1: speech:" in out
+
+
+# ---------- recordings: deleted after analysis unless kept ----------
+
+def results_file(brief):
+    with open(os.path.join(os.path.dirname(brief), "interview_results.json"), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def test_live_recordings_are_deleted_after_analysis_by_default(brief, tmp_path, devices):
+    rec = tmp_path / "rec"
+    said = []
+    results = run_interview(brief, recordings_dir=str(rec), wait_for_enter=enter_log()[1], say=said.append)
+    n = results["overall"]["questions_total"]
+    assert results["overall"]["questions_answered"] == n          # analysed first ...
+    assert results["questions"][0]["speech"]["word_count"] == len(WORDS)
+    assert not rec.exists()                                       # ... then files and the empty folder are gone
+    assert said[-1] == "Recordings deleted."
+
+
+def test_results_paths_are_null_after_deletion(brief, tmp_path, devices):
+    results = run_interview(brief, recordings_dir=str(tmp_path / "rec"), wait_for_enter=enter_log()[1],
+                            say=lambda *a: None)
+    for saved in (results, results_file(brief)):                   # the returned dict and the file agree
+        assert all(q["recordings"] == {"audio": None, "video": None} for q in saved["questions"])
+
+
+def test_keep_recordings_keeps_files_and_paths(brief, tmp_path, devices):
+    rec = tmp_path / "rec"
+    said = []
+    results = run_interview(brief, recordings_dir=str(rec), wait_for_enter=enter_log()[1], say=said.append,
+                            keep_recordings=True)
+    n = results["overall"]["questions_total"]
+    assert sorted(os.listdir(rec)) == sorted([f"q{i}.{e}" for i in range(1, n + 1) for e in ("wav", "avi")])
+    first = results_file(brief)["questions"][0]["recordings"]
+    assert first["audio"].endswith("q1.wav") and first["video"].endswith("q1.avi")
+    assert said[-1].startswith("Recordings kept in ") and said[-1].endswith("rec")
+
+
+def test_pre_recorded_files_are_never_deleted(brief, tmp_path, devices):
+    audio = interview_speech.write_wav(str(tmp_path / "a1.wav"), tone(2.0))
+    video = tmp_path / "v1.avi"
+    video.write_bytes(b"x")
+    said = []
+    results = run_interview(brief, audio_files=[audio], video_files=[str(video)], say=said.append)
+    assert results["mode"] == "files"
+    assert os.path.isfile(audio) and video.read_bytes() == b"x"
+    assert results["questions"][0]["recordings"]["audio"] is not None   # their paths stay in the results
+    assert not any("Recordings" in line for line in said)
+
+
+def test_a_failed_run_does_not_delete_files_it_did_not_create(brief, tmp_path, monkeypatch, devices):
+    rec = tmp_path / "rec"
+    rec.mkdir()
+    (rec / "notes.txt").write_text("mine", encoding="utf-8")       # someone else's file in the folder
+    (rec / "q1.wav").write_bytes(b"old")                          # left from before; this run fails to record q1
+
+    def mic_error(path, max_seconds=0, stop=None):
+        raise SpeechError("no microphone")
+    monkeypatch.setattr(interview_speech, "record_audio", mic_error)
+    run_interview(brief, recordings_dir=str(rec), wait_for_enter=enter_log()[1], say=lambda *a: None)
+    assert sorted(os.listdir(rec)) == ["notes.txt", "q1.wav"]      # this run's videos deleted, the rest kept
+    assert (rec / "q1.wav").read_bytes() == b"old"
+
+
+def test_a_partial_file_from_a_failing_device_is_deleted(brief, tmp_path, monkeypatch, devices):
+    rec = tmp_path / "rec"
+
+    def half_written(path, stop=None, max_seconds=0, camera=None):
+        open(path, "wb").write(b"half")                           # the device started writing, then failed
+        raise VisionError("webcam unplugged")
+    monkeypatch.setattr(interview_vision, "record_video", half_written)
+    run_interview(brief, recordings_dir=str(rec), wait_for_enter=enter_log()[1], say=lambda *a: None)
+    assert not rec.exists()
+
+
+def test_a_run_that_cannot_start_deletes_nothing(tmp_path, devices):
+    out = tmp_path / "output"
+    out.mkdir()
+    rec = tmp_path / "rec"
+    rec.mkdir()
+    (rec / "q1.wav").write_bytes(b"earlier interview")
+    with pytest.raises(BriefError):
+        run_interview(str(out / "interview_brief.json"), recordings_dir=str(rec))
+    assert (rec / "q1.wav").read_bytes() == b"earlier interview"
+
+
+def test_nothing_recorded_says_so(brief, tmp_path, monkeypatch, devices):
+    def mic_error(path, max_seconds=0, stop=None):
+        raise SpeechError("no microphone")
+
+    def cam_error(path, stop=None, max_seconds=0, camera=None):
+        raise VisionError("no webcam")
+    monkeypatch.setattr(interview_speech, "record_audio", mic_error)
+    monkeypatch.setattr(interview_vision, "record_video", cam_error)
+    said = []
+    run_interview(brief, recordings_dir=str(tmp_path / "rec"), wait_for_enter=enter_log()[1], say=said.append)
+    assert said[-1] == "No recordings were made."
+
+
+def test_command_line_keep_recordings_flag(brief, monkeypatch):
+    seen = {}
+
+    def fake(brief_path, **kwargs):
+        seen.update(kwargs)
+        return {"overall": {"questions_answered": 1, "questions_total": 4, "speech": None, "vision": None},
+                "questions": []}
+    monkeypatch.setattr(interview_agent, "run_interview", fake)
+    assert interview_agent.main(["--brief", brief]) == 0
+    assert seen["keep_recordings"] is False
+    assert interview_agent.main(["--brief", brief, "--keep-recordings"]) == 0
+    assert seen["keep_recordings"] is True
