@@ -391,3 +391,22 @@ def test_untrusted_job_text_and_links_are_not_rendered(app_env, tmp_path, monkey
     links = [el.proto.url for el in at.get("link_button")]
     assert links == ["https://example.com/jobs/1"]                  # only the safe one
     assert any("No safe link" in c.value for c in at.caption)
+
+
+# ---------- the link to the mock interview page ----------
+
+def test_confirm_offers_the_interview_page(app_env):
+    at = find_jobs(new_app())
+    button(at, CONFIRM).click().run()
+    assert dashboard.INTERVIEW_PAGE == "pages/interview.py"
+    assert os.path.isfile(os.path.join(ROOT, dashboard.INTERVIEW_PAGE))
+    button(at, "Go to the mock interview").click().run()
+    assert not at.exception
+    assert [t.value for t in at.title] == ["INTERVAI: mock interview"]     # the interview page is open
+    assert [b.label for b in at.button] == ["Start the interview"]       # with this run's brief
+
+
+def test_quit_does_not_offer_the_interview(app_env):
+    at = find_jobs(new_app())
+    button(at, QUIT).click().run()
+    assert all(b.label != "Go to the mock interview" for b in at.button)
