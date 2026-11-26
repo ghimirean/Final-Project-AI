@@ -7,6 +7,7 @@ user picks a job, i.e. after it prints "Interview brief for Agent 4".
     python agents/interview_agent.py --questions-only        # just print the questions
     python agents/interview_agent.py --audio a1.wav a2.wav --video v1.avi v2.avi
                                                              # pre-recorded answers, in question order
+    python agents/interview_agent.py --keep-recordings       # live, but keep the audio + video afterwards
 
 Flow: read the brief -> build 4-5 template questions (interview_questions.py)
 -> for each question record the answer (microphone + webcam at the same time)
@@ -98,15 +99,46 @@ def record_answer(number, recordings_dir, wait_for_enter, say, max_seconds=MAX_A
 
 # ---------- the interview ----------
 
+def delete_recordings(created, recordings_dir):
+    """Deletes the files THIS run recorded (`created`), then this run's recordings
+    folder if it is empty. Only paths inside recordings_dir are touched. Returns
+    (deleted paths, paths that could not be deleted)."""
+    folder = os.path.abspath(recordings_dir)
+    deleted, failed = [], []
+    for path in created:
+        path = os.path.abspath(path)
+        if os.path.dirname(path) != folder:                  # never anything outside this run's folder
+            continue
+        try:
+            os.remove(path)
+            deleted.append(path)
+        except FileNotFoundError:
+            deleted.append(path)
+        except OSError:
+            failed.append(path)
+    try:
+        if os.path.isdir(folder) and not os.listdir(folder):
+            os.rmdir(folder)
+    except OSError:
+        pass
+    return deleted, failed
+
+
 def run_interview(brief_path=DEFAULT_BRIEF, audio_files=None, video_files=None, recordings_dir=None,
-                  wait_for_enter=input, say=print, max_answer_seconds=MAX_ANSWER_SECONDS):
+                  wait_for_enter=input, say=print, max_answer_seconds=MAX_ANSWER_SECONDS,
+                  keep_recordings=False):
     """Runs the mock interview and writes interview_results.json next to the brief
     (output/interview_results.json). Returns the same results as a dict.
 
     Live by default (microphone + webcam). Give `audio_files` and/or `video_files`
     (lists in question order, None to skip one) to analyse pre-recorded answers instead.
     Raises BriefError if there is no usable brief; a failing microphone, webcam or
-    model is written into the results (per question "errors") instead of stopping the interview."""
+    model is written into the results (per question "errors") instead of stopping the interview.
+
+    Live mode: once the answers are analysed and the results saved, the audio and
+    video files recorded in this run are deleted (and the run's recordings folder if
+    it is then empty), and their "recordings" paths in the results become null.
+    keep_recordings=True keeps them. Pre-recorded files (mode "files") are never deleted."""
     out_dir = os.path.dirname(os.path.abspath(brief_path))
     remove_old_results(out_dir)         # first of all: a failed or half-finished run must not leave old results behind
     interview = build_interview(brief_path)
@@ -117,27 +149,58 @@ def run_interview(brief_path=DEFAULT_BRIEF, audio_files=None, video_files=None, 
         raise InterviewError(f"This interview has {len(questions)} questions, but "
                              f"{max(len(audio_files), len(video_files))} answer files were given.")
     answers = []
+    created = []                        # files THIS run recorded (live mode only): the only ones ever deleted
     if mode == "live":
         recordings_dir = recordings_dir or os.path.join(RECORDINGS_DIR, datetime.now().strftime("%Y%m%d-%H%M%S"))
         job = interview["job"]
         say(f"\nMock interview for {job['title']}" + (f" at {job['company']}" if job["company"] else "")
             + f": {len(questions)} questions. Your answers are recorded on this computer only.")
     for index, q in enumerate(questions):
-        answer = dict(q, answered=False, answer_seconds=None, speech=None, vision=None, errors=[],
-                      recordings={"audio": None, "video": None})
         if mode == "live":
             say(f"\nQuestion {q['id']} of {len(questions)}: {q['question']}")
+            planned = [os.path.join(recordings_dir, f"q{q['id']}.{ext}") for ext in ("wav", "avi")]
+            existed = {p for p in planned if os.path.exists(p)}
             got = record_answer(q["id"], recordings_dir, wait_for_enter, say, max_answer_seconds)
+            # recorded now: a finished recording, or a partial file a failing device left behind
+            created += [p for p in planned
+                        if p in (got["audio"], got["video"]) or (p not in existed and os.path.exists(p))]
         else:
             got = {"audio": audio_files[index] if index < len(audio_files) else None,
                    "video": video_files[index] if index < len(video_files) else None, "errors": []}
-        answer["recordings"] = {"audio": _rel(got["audio"]), "video": _rel(got["video"])}
-        answer["errors"] = list(got["errors"])
-        answer["_files"] = got
-        answers.append(answer)
+        answers.append(new_answer(q, got))
 
+    return analyse_and_save(answers, brief, brief_path, mode, recordings_dir, keep_recordings,
+                            created=created, say=say)
+
+
+def new_answer(question, got):
+    """One answer before analysis: the question's fields + the recorded or given
+    files (`got` = {"audio", "video", "errors"}, as record_answer returns)."""
+    return dict(question, answered=False, answer_seconds=None, speech=None, vision=None,
+                errors=list(got["errors"]),
+                recordings={"audio": _rel(got["audio"]), "video": _rel(got["video"])},
+                _files=got)
+
+
+def analyse_and_save(answers, brief, brief_path, mode, recordings_dir=None, keep_recordings=False,
+                     created=None, say=print, on_answer=None):
+    """Analyses the answers (new_answer() dicts, in question order) with Whisper and
+    MediaPipe, builds the results, saves interview_results.json next to the brief and
+    applies the recordings policy: in live mode the files recorded in this run are
+    deleted after analysis (their paths become null) unless keep_recordings.
+    Returns the results dict.
+
+    created: the files this run recorded, the only ones that are ever deleted
+    (default: the answers' own recorded files). on_answer(number, total) is
+    called before each answer is analysed (for a progress display)."""
+    out_dir = os.path.dirname(os.path.abspath(brief_path))
+    if created is None:
+        created = [p for a in answers for p in (a["_files"]["audio"], a["_files"]["video"]) if p] \
+            if mode == "live" else []
     say("\nAnalysing your answers...")
-    for answer in answers:
+    for number, answer in enumerate(answers, start=1):
+        if on_answer:
+            on_answer(number, len(answers))
         files = answer.pop("_files")
         if files["audio"]:
             try:
@@ -159,6 +222,23 @@ def run_interview(brief_path=DEFAULT_BRIEF, audio_files=None, video_files=None, 
     results = build_results(brief, brief_path, answers, mode, settings)
     path = save_results(results, out_dir)
     say(f"Interview results saved to {_rel(path)}")
+    if mode == "live":
+        if keep_recordings:
+            say(f"Recordings kept in {_rel(recordings_dir)}" if created else "No recordings were made.")
+        elif created:
+            deleted, failed = delete_recordings(created, recordings_dir)
+            gone = {_rel(p) for p in deleted}
+            for answer in results["questions"]:
+                answer["recordings"] = {kind: (None if p in gone else p)
+                                        for kind, p in answer["recordings"].items()}
+            save_results(results, out_dir)                    # the deleted files' paths are now null
+            if failed:
+                say(f"Recordings deleted, except {len(failed)} file(s) that could not be deleted in "
+                    f"{_rel(recordings_dir)}")
+            else:
+                say("Recordings deleted.")
+        else:
+            say("No recordings were made.")
     return results
 
 
@@ -183,6 +263,8 @@ def main(argv=None):
     parser.add_argument("--questions-only", action="store_true", help="print the questions and stop")
     parser.add_argument("--audio", nargs="+", metavar="FILE", help="pre-recorded answers (audio), in question order")
     parser.add_argument("--video", nargs="+", metavar="FILE", help="pre-recorded answers (video), in question order")
+    parser.add_argument("--keep-recordings", action="store_true",
+                        help="keep this interview's audio and video in recordings/ (deleted after analysis by default)")
     args = parser.parse_args(argv)
     try:
         if args.questions_only:
@@ -192,7 +274,8 @@ def main(argv=None):
             for q in interview["questions"]:
                 print(f"\nQ{q['id']} [{q['kind']}] {q['question']}")
             return 0
-        results = run_interview(args.brief, audio_files=args.audio, video_files=args.video)
+        results = run_interview(args.brief, audio_files=args.audio, video_files=args.video,
+                                keep_recordings=args.keep_recordings)
     except (BriefError, InterviewError) as e:
         print(f"Agent 4 cannot start: {e}", file=sys.stderr)
         return 1

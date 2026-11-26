@@ -177,3 +177,115 @@ def test_years_question_takes_the_candidate_years_from_the_gaps():
                        gaps=["3+ years of experience (candidate has 1.0)"])
     experience = next(q for q in build_questions(brief) if q["kind"] == "experience")
     assert "3+ years" in experience["question"] and "about 1.0" in experience["question"]
+
+
+# ---------- degree gaps get an education question ----------
+
+def test_degree_in_gaps_asks_about_education():
+    brief = make_brief(interview_focus=[], gaps=["Bachelor's degree"])
+    gap = next(q for q in build_questions(brief) if q["kind"] == "gap")
+    assert gap["topic"] == "Bachelor's degree"
+    assert gap["question"] == ("The posting lists a Bachelor's degree. Tell me about your education "
+                               "and how it prepares you for this role.")
+    assert "get up to speed" not in gap["question"]
+    assert set(gap) == {"id", "kind", "topic", "source", "question"}   # same output format
+
+
+def test_degree_in_interview_focus_asks_about_education():
+    brief = make_brief(interview_focus=["Bachelor's degree (asked for, not on the resume)"],
+                       gaps=["Bachelor's degree"])
+    gap = next(q for q in build_questions(brief) if q["kind"] == "gap")
+    assert gap["source"] == "interview_focus"
+    assert gap["question"].startswith("The posting lists a Bachelor's degree.")
+    assert "education" in gap["question"] and "get up to speed" not in gap["question"]
+
+
+@pytest.mark.parametrize("topic, article", [("Master's degree", "a"), ("PhD", "a"),
+                                            ("Associate's degree", "an"), ("doctorate", "a")])
+def test_other_degrees_ask_about_education(topic, article):
+    brief = make_brief(interview_focus=[], gaps=[topic])
+    gap = next(q for q in build_questions(brief) if q["kind"] == "gap")
+    assert gap["question"].startswith(f"The posting lists {article} {topic}.")
+
+
+def test_skill_gap_keeps_the_old_wording():
+    brief = make_brief(interview_focus=["Linux (asked for, not on the resume)"], gaps=["Linux"])
+    gap = next(q for q in build_questions(brief) if q["kind"] == "gap")
+    assert gap["question"] == ("The posting asks for Linux, but I don't see it on your resume. What "
+                               "experience do you have with it, and how would you get up to speed quickly?")
+
+
+# ---------- "your resume shows" only for skills and projects on the resume ----------
+
+UNGROUNDED = ("authoritative Best Colleges (ask for an example; resume: Rank: 1/39 "
+              "GPA:Overall3.95/4.3;Major4.05/4.3 Teaching: TeachingassistantofCalculus)")
+
+
+def test_claim_backed_only_by_a_free_text_resume_line_is_skipped():
+    brief = make_brief(interview_focus=[UNGROUNDED, "Java (ask for an example; resume: skills: Java)"],
+                       gaps=[])
+    questions = build_questions(brief)
+    assert all("Best Colleges" not in (q["topic"] or "") for q in questions)
+    assert all("Best Colleges" not in q["question"] for q in questions)
+    claims = [q for q in questions if q["kind"] == "claim"]
+    assert [q["topic"] for q in claims] == ["Java"]
+
+
+def test_skipped_claim_does_not_use_up_a_question():
+    # 1 ungrounded claim + 1 real claim + the project: all 3 slots still go to real topics
+    brief = make_brief(interview_focus=[UNGROUNDED, "Java (ask for an example; resume: skills: Java)"],
+                       gaps=[])
+    content = [q for q in build_questions(brief) if q["kind"] not in ("intro", "closing")]
+    assert [(q["kind"], q["topic"]) for q in content] == [("claim", "Java"),
+                                                          ("project", "Car Rental System")]
+
+
+def test_only_ungrounded_claims_fall_back_to_generic_questions():
+    brief = make_brief(interview_focus=[UNGROUNDED], gaps=[])
+    brief["candidate"]["projects"] = []
+    content = [q for q in build_questions(brief) if q["kind"] not in ("intro", "closing")]
+    assert [q["kind"] for q in content] == ["general", "general"]
+
+
+def test_skill_claim_with_skills_evidence_still_asks_for_an_example():
+    brief = make_brief(interview_focus=["Java (ask for an example; resume: skills: Java)"], gaps=[])
+    claim = next(q for q in build_questions(brief) if q["kind"] == "claim")
+    assert claim["topic"] == "Java"
+    assert claim["question"].startswith("Your resume shows Java. Walk me through a specific example")
+
+
+def test_skills_evidence_grounds_a_claim_even_if_not_in_the_candidate_skills():
+    brief = make_brief(interview_focus=["Git (ask for an example; resume: skills: Git)"], gaps=[])
+    claim = next(q for q in build_questions(brief) if q["kind"] == "claim")
+    assert claim["topic"] == "Git"
+
+
+def test_bare_skill_on_the_resume_still_asks_for_an_example():
+    brief = make_brief(interview_focus=["java"], gaps=[])          # rule-based fallback, any case
+    claim = next(q for q in build_questions(brief) if q["kind"] == "claim")
+    assert claim["question"].startswith("Your resume shows java.")
+
+
+def test_a_project_name_counts_as_on_the_resume():
+    brief = make_brief(interview_focus=["car rental system"], gaps=[])
+    brief["candidate"]["skills"] = []
+    assert [q["topic"] for q in build_questions(brief) if q["kind"] == "claim"] == ["car rental system"]
+
+
+def test_a_skill_listed_under_a_project_counts_as_on_the_resume():
+    brief = make_brief(interview_focus=["OOP"], gaps=[])
+    assert not [q for q in build_questions(brief) if q["kind"] == "claim"]   # not on this resume
+    brief["candidate"]["projects"][0]["skills"] = ["Java", "OOP"]
+    assert [q["topic"] for q in build_questions(brief) if q["kind"] == "claim"] == ["OOP"]
+
+
+def test_bare_phrase_not_on_the_resume_is_skipped():
+    brief = make_brief(interview_focus=["stakeholder communication"], gaps=[])
+    assert not [q for q in build_questions(brief) if q["kind"] == "claim"]
+
+
+def test_gap_items_are_unchanged():
+    brief = make_brief(interview_focus=["Kubernetes (asked for, not on the resume)"], gaps=["Kubernetes"])
+    gap = next(q for q in build_questions(brief) if q["kind"] == "gap")
+    assert gap["topic"] == "Kubernetes" and gap["source"] == "interview_focus"
+    assert gap["question"].startswith("The posting asks for Kubernetes, but I don't see it on your resume.")

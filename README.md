@@ -4,7 +4,8 @@ A multi-agent AI mock interview platform. This README covers **Agent 1
 (Resume Parser)**, **Agent 2 (Job Search)**, **Agent 3 (Job Description Synthesizer + Match Scoring)**,
 **Agent 4 (Mock Interview: speech + computer vision)**,
 the **pipeline / API**, the **orchestrator** that runs Agents 1-3 and hands the chosen job to Agent 4,
-and the **HITL dashboard** (`streamlit run dashboard.py`) where the user picks that job in the browser.
+and the **HITL dashboard** (`streamlit run dashboard.py`) where the user picks that job in the browser
+and then takes the **mock interview** on the interview page, ending with a scorecard.
 
 | Agent | Kind of AI | Model | What the model does | Fallback |
 |---|---|---|---|---|
@@ -34,6 +35,9 @@ conda activate intervai_env
 pip install -r requirements.txt
 cp .env.example .env        # then put your API keys in .env (never commit it)
 ```
+
+**Python version:** the pinned `requirements.txt` is tested on **Python 3.11** (GitHub Actions CI) and
+installs on Python 3.11 to 3.14.
 
 The empty template in `.env.example` lists three keys. Fill in the ones you
 need:
@@ -927,7 +931,10 @@ Streamlit opens http://localhost:8501 in the browser.
    interview**, which writes `output/interview_brief.json` for Agent 4 and
    `output/run_trace.json`. Or click **Quit without choosing**: the trace
    records the quit and no brief is written.
-7. **Start over** to run another resume.
+7. After Confirm, **Go to the mock interview** opens the interview page (see
+   "Mock interview page" below) with this run's brief. After a Quit there is
+   no brief, so the interview is not offered.
+8. **Start over** to run another resume.
 
 **Messages:** a stage that fails shows which agent failed and why (e.g. a
 file that isn't a real PDF). Fallbacks are explained: offline or demo
@@ -969,12 +976,18 @@ different kind of AI from Agent 2. Nothing is sent anywhere, and no API key is n
 | `agents/interview_speech.py` | Records the microphone, Whisper transcript, words per minute, filler words, long pauses |
 | `agents/interview_vision.py` | Records the webcam, MediaPipe eye contact, posture and smile |
 | `agents/interview_results.py` | Overall numbers and `output/interview_results.json` |
+| `agents/interview_recorder.py` | `AnswerRecorder`: records one answer (microphone + webcam) in the background, started and stopped by the interview page's buttons |
+| `interview_ui.py` | The mock interview page (Streamlit): questions one at a time, analysis, scorecard |
+| `pages/interview.py` | Makes `interview_ui.py` a page of the dashboard app (opened by **Go to the mock interview**) |
+| `.streamlit/config.toml` | Hides Streamlit's page list in the sidebar, so the interview is only offered after a Confirm |
 
 **Run it**
 ```bash
 python agents/orchestrator.py data/sample.pdf --demo --interview   # the whole app: Agents 1-3, job choice, then the interview
+python agents/orchestrator.py data/sample.pdf --demo --interview --keep-recordings   # ...and keep the audio + video
 python agents/orchestrator.py data/sample.pdf --demo      # or: choose a job and wait for "Interview brief for Agent 4"...
 python agents/interview_agent.py                          # ...then run the interview alone: microphone + webcam
+python agents/interview_agent.py --keep-recordings        # the same, but keep the audio + video afterwards
 python agents/interview_agent.py --questions-only         # just print the questions, record nothing
 python agents/interview_agent.py --audio a1.wav a2.wav --video v1.avi v2.avi   # pre-recorded answers, in question order
 ```
@@ -987,8 +1000,14 @@ results = run_interview("output/interview_brief.json")    # the same dict that i
   that is older than the `run_trace.json` next to it (left over from an earlier run).
 - **Live:** for each question press Enter, answer out loud while looking at the camera, press Enter again
   (limit 120 s). Recording comes first and the analysis after the last question, so there is no
-  waiting between questions. The recordings go to `recordings/<date-time>/` (git-ignored); delete the
-  folder when you no longer need it. A recorded video never leaves the computer.
+  waiting between questions. The recordings go to `recordings/<date-time>/` (git-ignored) and are
+  **deleted once the answers are analysed and the results are saved** (the folder too, if it is then empty).
+  Their `recordings` paths in `interview_results.json` are then `null`, and the last line says
+  "Recordings deleted." With `--keep-recordings` (`run_interview(..., keep_recordings=True)`) they are kept,
+  their paths stay in the results, and the last line says "Recordings kept in recordings/<date-time>";
+  delete that folder yourself when you no longer need it. Only files recorded in this run are ever deleted,
+  never anything else in the folder or outside it, and nothing is deleted if the interview stops early
+  (for example with no usable brief). A recorded video never leaves the computer.
 - **Pre-recorded:** `--audio` / `--video` take one file per question, in order (WAV is read directly; mp3/m4a
   need ffmpeg). Fewer files than questions is fine (the rest count as unanswered); more is an error.
   The given files are never changed or deleted.
@@ -1006,6 +1025,12 @@ results = run_interview("output/interview_brief.json")    # the same dict that i
    you have about 1.0"), then the candidate's first project. If the brief has too little, generic
    questions (problem solving, teamwork, learning quickly) fill in.
 3. **Closing** ("Why should we hire you ...").
+
+**Degree gaps** (a topic with bachelor, master, PhD, doctorate, associate or "degree" in it, from
+`gaps` or `interview_focus`) get an education question instead of the skill wording, because a degree
+can't be picked up quickly: "The posting lists a Bachelor's degree. Tell me about your education and
+how it prepares you for this role." The question's `kind` is still `gap`, so `interview_results.json`
+doesn't change.
 
 ### Speech (`interview_speech.py`)
 Whisper transcribes the answer with word timestamps. A short prompt makes Whisper keep "um" and "uh"
@@ -1090,7 +1115,53 @@ scorecard / feedback page (`results_version` changes if the format does).
 - `overall.speech.words_per_minute` is all words ÷ all speaking time. `overall.vision` percentages average the answers,
   each weighted by its frames analysed. `longest_look_away_seconds` is the maximum.
 - The file contains the transcripts (the candidate's own words) but no name, email, phone or links: the brief has none.
-  `recordings` points at the audio and video files, which are in the git-ignored `recordings/` folder.
+  `recordings` points at the audio and video files, which are in the git-ignored `recordings/` folder; in live
+  mode both paths are `null` after the recordings are deleted (the default; see `--keep-recordings`).
+  Pre-recorded runs (`"mode": "files"`) keep the paths of the files you gave.
+
+---
+
+## Mock interview page — Agent 4 in the browser (`interview_ui.py`)
+
+A Streamlit front end for Agent 4. It uses Agent 4's own functions for the questions
+(`build_interview`), the recording (`interview_speech.record_audio` / `interview_vision.record_video`,
+through `agents/interview_recorder.py`) and the analysis (`analyse_and_save`), so it writes exactly
+the same `output/interview_results.json` as `python agents/interview_agent.py`.
+
+**Run it**
+```bash
+streamlit run dashboard.py        # the whole flow: choose a job, then "Go to the mock interview"
+streamlit run interview_ui.py     # or the interview page alone, for the brief already in output/
+```
+
+**The flow: dashboard → interview → scorecard**
+1. **Dashboard:** find jobs, choose one and click **Confirm and prepare the interview**
+   (writes `output/interview_brief.json`), then **Go to the mock interview**.
+2. **Start page:** the job, the number of questions (4 or 5) and a **Keep my recordings on this
+   computer** checkbox (off by default). **Start the interview** removes any old
+   `interview_results.json`, so a half-finished run never shows old results. Without a usable brief
+   (missing, from an earlier run, or an unknown version) the page says to choose a job first.
+3. **Questions, one at a time** ("Question 2 of 5"): **Start answering** starts the microphone and
+   webcam together, **Stop** ends the recording (at most 120 s), then **Next question** (**Finish** on
+   the last one). Buttons that don't apply are disabled. A device that fails is reported for that
+   question ("Video (webcam): Could not open the webcam.") and the other one keeps recording.
+4. **Analysis** (Whisper + MediaPipe, about 10 seconds) runs once after **Finish**, with a line per
+   answer ("Analysing answer 2 of 5..."). Problems are listed per question in plain words. If no
+   answer could be analysed, the page says so and shows no scorecard.
+5. **Scorecard**, read from `output/interview_results.json`: words per minute, filler words, long
+   pauses, eye contact %, upright posture % and smile %, then each question in an expander with its
+   text, the transcript and that answer's numbers. A value that couldn't be measured shows "n/a".
+   **Interview again** goes back to the start page.
+
+**Privacy:** everything stays on this computer: the recordings, Whisper and MediaPipe all run
+locally and nothing is uploaded. **Recordings are deleted after analysis by default**, like
+`python agents/interview_agent.py`: the files recorded in this interview (and its
+`recordings/<date-time>/` folder if it is then empty) are removed, and their paths in the results
+become `null`. Tick **Keep my recordings on this computer** to keep them in `recordings/<date-time>/`.
+Questions and transcripts are shown as plain text, never as HTML.
+
+The output and recordings folders can be changed with `INTERVAI_OUTPUT_DIR` and
+`INTERVAI_RECORDINGS_DIR` (the tests use temporary folders).
 
 ---
 
@@ -1115,7 +1186,7 @@ see the **Actions** tab on GitHub, or the ✓ / ✗ next to each commit.
 | `tests/test_unseen_layouts.py` | The 3 fake resumes in unseen layouts are readable (the PDF really has two columns) and the checker's field comparison works |
 | `tests/test_orchestrator.py` | The full run with fake Agent 2 LLM/provider: stage order and trace fields, fallbacks recorded, no contact details in the trace, fixture-job fallback (no key, failed searches, no jobs, crash) with a warning, per-search records and real vs fixture job counts in the trace, the full ranking saved to `ranked_jobs.json` (best first, also offline and on quit, resume quotes scrubbed), `--demo` replay (saved jobs or newest cache entry, whichever is newer, no Groq/JSearch calls, traced as demo replay, fixture fallback with a warning, not with `--offline`), widening traced and warned, HTTP status in the error warning, no key = no Groq/JSearch calls, `--offline`; the terminal chooser (top 5 menu, number, invalid input asked again, custom role validated, quit / Ctrl-D); custom role through Agent 3; the interview brief (fields, original description, no contact details, free text scrubbed, none when the user quits) |
 | `tests/test_orchestrator_split.py` | `prepare_run` / `finish_run` (offline): ranking written but no brief or trace before the choice, a chosen job (brief + all 5 trace stages), a custom role, quit (no brief, `quit` in the trace), a run finished only once, `on_stage` order (and the failing stage reported last), `run_intervai` gives the same result as the two halves |
-| `tests/test_dashboard.py` | The HITL dashboard. Plain tests: modes (live defaults to 1 step), file types, the temp resume deleted after use and after a failure, run state cleared, markdown escaped, only http(s) links allowed, choice and custom-role validation, score breakdown, every fallback/error message. Streamlit `AppTest` (offline mode, temp output folder): start page, live-mode warning, cards rendered and the agents run once (not on reruns), confirm writes the brief and clears the run and the upload, custom role, quit, a broken PDF, a malicious job title and `javascript:` link shown as plain text |
+| `tests/test_dashboard.py` | The HITL dashboard. Plain tests: modes (live defaults to 1 step), file types, the temp resume deleted after use and after a failure, run state cleared, markdown escaped, only http(s) links allowed, choice and custom-role validation, score breakdown, every fallback/error message. Streamlit `AppTest` (offline mode, temp output folder): start page, live-mode warning, cards rendered and the agents run once (not on reruns), confirm writes the brief and clears the run and the upload, custom role, quit, a broken PDF, a malicious job title and `javascript:` link shown as plain text, **Go to the mock interview** offered after Confirm (and opening the interview page) but not after Quit |
 | `tests/test_job_synthesizer.py` | Requirement extraction, scoring, penalties, ranking (on the TF-IDF fallback), the optional LLM key points with a fake Groq: score unchanged, no contact details in the prompt, every fallback case |
 | `tests/test_keypoints.py` | Embedding key points: spaCy candidate phrases, the real KeyBERT on a fake embedding model, resume matching (by skill, by similarity, not at all), nice-to-haves (cue sentences, "Preferred" sections split at line breaks and bullets, required wins), field building, no Groq calls by default, score unchanged, fallbacks, the KeyBERT-vs-Groq matching in `scripts/compare_key_points.py` |
 | `tests/test_embeddings.py` | Chunking, best-chunk similarity, the 0–40 mapping, scores not depending on other jobs, fallback |
@@ -1129,6 +1200,8 @@ see the **Actions** tab on GitHub, or the ✓ / ✗ next to each commit.
 | `tests/test_interview_vision.py` | Agent 4 vision with made-up landmarks, a fake camera, a tiny synthetic video and scripted fake detectors: eye contact (head turned, looking up/down, eyes turned), smile, posture (hunched, tilted, leaning, not visible), the summary percentages and "too few frames" cases, recording at real-time length, frame sampling, increasing MediaPipe timestamps, detectors always closed, model download and its failure message |
 | `tests/test_interview_results.py` | Overall speech and vision numbers (pace from total words and time, frame-weighted percentages, missing parts), results document shape, atomic save, old results removed |
 | `tests/test_interview_agent.py` | The whole interview with fake devices: live flow, both devices recording at the same time, time limit and Enter to stop, a failing webcam / microphone / Whisper recorded per question, pre-recorded files (partial, `None`, missing file, too many), no stale results, no brief, the command line and its exit codes |
+| `tests/test_interview_recorder.py` | `AnswerRecorder` with fake microphone and webcam: both start together, `start()` returns at once and `stop()` returns the paths, files named `q{n}.wav` / `q{n}.avi`, the 120 s limit (and a custom one), recording ending by itself at the limit, one failing device not stopping the other, an unexpected device crash, stop twice / start twice, the "created files" rule (recordings and partial files count, a file that was already there doesn't) |
+| `tests/test_interview_ui.py` | The interview page with Streamlit `AppTest`, fake devices and fake analysers, in temp folders: no brief, a wrong-version brief, the start page, old results removed on start, the button phases, all questions answered with a scorecard and progress lines, "n/a" for missing values, a failing webcam on one question, nothing analysed (no scorecard), recordings deleted by default and kept with the checkbox, no repeated analysis on a rerun, HTML and a `javascript:` link shown as plain text, Interview again |
 
 **Tests never call a real LLM or job site, or load the real embedding model.**
 `tests/conftest.py` blocks the network function in `agents/llm.py`, the
@@ -1336,8 +1409,19 @@ Real resumes (`data/*.pdf`, `data/*.docx`), `output/`, `recordings/` and the Med
 - **The brief is trusted for its content.** Agent 4 checks the version, the job title and that the brief is not older
   than the latest orchestrator run, but not that the questions make sense for the job.
 - **No audio or video is kept in the results file**, only the metrics, the transcripts and the path of the recording.
-  The dashboard (`streamlit run dashboard.py`) only writes the brief: start the interview afterwards with
-  `python agents/interview_agent.py`.
+  From the dashboard (`streamlit run dashboard.py`), **Go to the mock interview** starts the interview in the browser;
+  `python agents/interview_agent.py` is the terminal version.
+
+**Mock interview page (`interview_ui.py`)**
+- **Eye contact, posture and smile are heuristics on landmarks, not yet calibrated on real recordings.** On one real
+  test the eye contact percentage came out **reversed** (higher while looking away than while looking at the camera),
+  so don't trust these three numbers until the thresholds in `interview_vision.py` are checked on real recordings.
+- **Closing the browser tab mid-answer leaves the camera (and microphone) on until the 120 s limit**: the recording
+  runs in background threads that only a **Stop** click or the time limit ends. The files are then left in
+  `recordings/<date-time>/`, because the delete-after-analysis step never runs.
+- **The tests use fakes only**: the real microphone, webcam, Whisper and MediaPipe are never run by them, so the
+  page's real recording and the analysis time (about 10 seconds) were checked by hand, not by the tests.
+- **One interview at a time on one computer:** every run writes the same `output/interview_results.json`.
 
 **Orchestrator**
 - **`--demo` replays the jobs of the last real run** (or the newest cache

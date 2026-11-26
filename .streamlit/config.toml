@@ -1,0 +1,6 @@
+# Streamlit settings for INTERVAI (streamlit run dashboard.py).
+[client]
+# The interview page (pages/interview.py) is opened by the dashboard's
+# "Go to the mock interview" button only after a job is confirmed, so it is
+# not listed in the sidebar (where it would also be offered after a Quit).
+showSidebarNavigation = false
