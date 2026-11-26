@@ -42,6 +42,7 @@ class AnswerRecorder:
         self._lock = threading.Lock()
         self._out = {"audio": None, "video": None, "errors": []}
         self.result = None                      # the stop() result, once stopped
+        self._existed = set()
 
     def _run(self, kind, path, error_type):
         # Looked up when the thread runs, so tests can replace the recorders with fakes
@@ -73,6 +74,7 @@ class AnswerRecorder:
         if self._threads:
             raise RuntimeError("this answer is already being recorded")
         os.makedirs(self.recordings_dir, exist_ok=True)
+        self._existed = {p for p in (self.audio_path, self.video_path) if os.path.exists(p)}
         self._threads = [
             threading.Thread(target=self._run, args=("audio", self.audio_path, SpeechError), daemon=True),
             threading.Thread(target=self._run, args=("video", self.video_path, VisionError), daemon=True)]
@@ -92,3 +94,13 @@ class AnswerRecorder:
             self.result = {"audio": self._out["audio"], "video": self._out["video"],
                            "errors": list(self._out["errors"])}
         return self.result
+
+    def created_files(self):
+        """The files this recording made (after stop()): a finished recording, or a
+        partial file a failing device left behind. A file that was already there
+        before start() and wasn't recorded now is never included (same rule as
+        run_interview), so the delete-after-analysis policy can't touch it."""
+        got = self.result or {}
+        return [p for p in (self.audio_path, self.video_path)
+                if p in (got.get("audio"), got.get("video"))
+                or (p not in self._existed and os.path.exists(p))]

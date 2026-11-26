@@ -18,9 +18,11 @@ import streamlit as st
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(ROOT, "agents"))
-from interview_agent import MAX_ANSWER_SECONDS, OUTPUT_DIR, build_interview  # noqa: E402
+from interview_agent import (MAX_ANSWER_SECONDS, OUTPUT_DIR, analyse_and_save,  # noqa: E402
+                             build_interview, new_answer)
 from interview_questions import BriefError  # noqa: E402
 from interview_recorder import AnswerRecorder, new_recordings_dir  # noqa: E402
+from interview_results import remove_old_results  # noqa: E402
 
 BRIEF_NAME = "interview_brief.json"
 
@@ -81,21 +83,39 @@ def button_states(phase):
     return {"start": phase == READY, "stop": phase == RECORDING, "next": phase == STOPPED}
 
 
-def new_session(interview, folder=None):
+def new_session(interview, folder=None, keep_recordings=False):
     """The st.session_state values for a freshly started interview."""
     return {"interview": interview, "started": True, "index": 0, "phase": READY,
-            "recorder": None, "answers": [], "finished": False,
+            "recorder": None, "answers": [], "created": [], "finished": False,
+            "keep_recordings": bool(keep_recordings), "analysis_started": False,
+            "analysis_error": None, "results": None, "recordings_note": None,
             "recordings_dir": folder or recordings_dir()}
 
 
 def device_problems(errors):
-    """Agent 4's error strings ("speech: ...", "vision: ...") in words for the user."""
-    names = {"speech": "Microphone", "vision": "Webcam"}
+    """Agent 4's error strings ("speech: ...", "vision: ...") in words for the user.
+    The same prefix is used for recording and analysis problems."""
+    names = {"speech": "Speech (microphone)", "vision": "Video (webcam)"}
     out = []
     for error in errors:
         kind, _, text = str(error).partition(": ")
         out.append(f"{names.get(kind, kind)}: {text}" if text else str(error))
     return out
+
+
+def build_answers(questions, recorded):
+    """Agent 4's answer entries (new_answer) for the recorded questions, in order."""
+    by_id = {r["id"]: r for r in recorded}
+    return [new_answer(q, {k: by_id[q["id"]][k] for k in ("audio", "video", "errors")})
+            for q in questions if q["id"] in by_id]
+
+
+def recordings_note(lines):
+    """The recordings line Agent 4 printed at the end ("Recordings deleted." ...), or None."""
+    for line in reversed(lines):
+        if line.startswith(("Recordings", "No recordings")):
+            return line
+    return None
 
 
 # ---------- the page ----------
@@ -115,8 +135,11 @@ def start_page(interview):
                 "recording yourself, and answer out loud while looking at the camera.")
     st.info("Your answers (microphone and webcam) are recorded and analysed on this computer "
             "only. Nothing is uploaded.")
+    keep = st.checkbox("Keep my recordings on this computer", value=False, key="keep_choice",
+                       help="Off: the audio and video are deleted as soon as they are analysed.")
     if st.button("Start the interview", type="primary"):
-        st.session_state.update(new_session(interview))
+        remove_old_results(output_dir())     # a half-finished run must never show old results
+        st.session_state.update(new_session(interview, keep_recordings=keep))
         st.rerun()
 
 
@@ -159,6 +182,7 @@ def question_page():
     if stop_col.button("Stop", disabled=not enabled["stop"]):
         got = s["recorder"].stop()
         s["answers"].append({"id": question["id"], **got})
+        s["created"] += s["recorder"].created_files()     # the only files the policy may delete
         s["recorder"], s["phase"] = None, STOPPED
         st.rerun()
     if next_col.button("Finish" if last else "Next question", disabled=not enabled["next"]):
@@ -169,18 +193,57 @@ def question_page():
         st.rerun()
 
 
-def finished_page():
-    answers = st.session_state["answers"]
-    recorded = sum(1 for a in answers if a["audio"] or a["video"])
-    st.success(f"Interview finished: {recorded} of {len(answers)} answers recorded.")
-    st.caption("The answers are saved on this computer. Analysing them comes in a later step.")
+def analyse():
+    """Runs Agent 4's analysis once (Whisper + MediaPipe, about 10 seconds), with a
+    progress line per answer. Saves output/interview_results.json and applies the
+    recordings policy (deleted unless "Keep my recordings" was ticked)."""
+    s = st.session_state
+    s["analysis_started"] = True
+    answers = build_answers(s["interview"]["questions"], s["answers"])
+    said = []
+    with st.status("Analysing your answers...", expanded=True) as status:
+        def progress(number, total):
+            status.update(label=f"Analysing answer {number} of {total}...")
+            st.write(f"Analysing answer {number} of {total}...")
+        try:
+            results = analyse_and_save(answers, s["interview"]["brief"], brief_path(), "live",
+                                       s["recordings_dir"], keep_recordings=s["keep_recordings"],
+                                       created=s["created"], say=said.append, on_answer=progress)
+        except Exception as e:                 # keep the page alive and say what happened
+            status.update(label="The analysis failed", state="error", expanded=False)
+            s["analysis_error"] = f"{type(e).__name__}: {e}"
+            return
+        status.update(label="Analysis finished", state="complete", expanded=False)
+    s["results"], s["recordings_note"] = results, recordings_note(said)
+
+
+def results_page():
+    s = st.session_state
+    if s["analysis_error"]:
+        st.error(f"Your answers could not be analysed. ({s['analysis_error']})")
+        return
+    results = s["results"]
+    overall = results["overall"]
+    answered, total = overall["questions_answered"], overall["questions_total"]
+    if answered:
+        st.success(f"Analysed {answered} of {total} answers.")
+    else:
+        st.error("None of your answers could be analysed, so there is no scorecard. Check that "
+                 "the microphone and webcam work and are not used by another app, then try again.")
+    for q in results["questions"]:
+        for problem in device_problems(q["errors"]):
+            st.caption(f"Question {q['id']}: {problem}")
+    if s["recordings_note"]:
+        st.caption(s["recordings_note"])
 
 
 def main():
     st.set_page_config(page_title="INTERVAI - mock interview", layout="centered")
     st.title("INTERVAI: mock interview")
     if st.session_state.get("finished"):
-        finished_page()
+        if not st.session_state.get("analysis_started"):
+            analyse()                          # once: never again on a rerun
+        results_page()
         return
     if st.session_state.get("started"):
         question_page()
