@@ -131,9 +131,18 @@ def parse_gap_item(item):
     return {"kind": "gap", "topic": topic, "detail": None} if topic else None
 
 
+# A degree gap ("Bachelor's degree", "Master") can't be learned "quickly", so
+# it gets an education question instead of the skill-gap wording.
+DEGREE = re.compile(r"\b(?:bachelor|master|ph\.?\s?d|doctorate|associate|degree)", re.IGNORECASE)
+
+
 def question_for(item):
     """Fills the template for one topic. Returns the question text."""
     topic, kind = item["topic"], item["kind"]
+    if kind == "gap" and DEGREE.search(topic):
+        article = "an" if topic[:1].lower() in "aeiou" else "a"
+        return (f"The posting lists {article} {topic}. Tell me about your education and how it "
+                "prepares you for this role.")
     if kind == "gap":
         return (f"The posting asks for {topic}, but I don't see it on your resume. What experience do you "
                 "have with it, and how would you get up to speed quickly?")

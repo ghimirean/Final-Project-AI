@@ -177,3 +177,39 @@ def test_years_question_takes_the_candidate_years_from_the_gaps():
                        gaps=["3+ years of experience (candidate has 1.0)"])
     experience = next(q for q in build_questions(brief) if q["kind"] == "experience")
     assert "3+ years" in experience["question"] and "about 1.0" in experience["question"]
+
+
+# ---------- degree gaps get an education question ----------
+
+def test_degree_in_gaps_asks_about_education():
+    brief = make_brief(interview_focus=[], gaps=["Bachelor's degree"])
+    gap = next(q for q in build_questions(brief) if q["kind"] == "gap")
+    assert gap["topic"] == "Bachelor's degree"
+    assert gap["question"] == ("The posting lists a Bachelor's degree. Tell me about your education "
+                               "and how it prepares you for this role.")
+    assert "get up to speed" not in gap["question"]
+    assert set(gap) == {"id", "kind", "topic", "source", "question"}   # same output format
+
+
+def test_degree_in_interview_focus_asks_about_education():
+    brief = make_brief(interview_focus=["Bachelor's degree (asked for, not on the resume)"],
+                       gaps=["Bachelor's degree"])
+    gap = next(q for q in build_questions(brief) if q["kind"] == "gap")
+    assert gap["source"] == "interview_focus"
+    assert gap["question"].startswith("The posting lists a Bachelor's degree.")
+    assert "education" in gap["question"] and "get up to speed" not in gap["question"]
+
+
+@pytest.mark.parametrize("topic, article", [("Master's degree", "a"), ("PhD", "a"),
+                                            ("Associate's degree", "an"), ("doctorate", "a")])
+def test_other_degrees_ask_about_education(topic, article):
+    brief = make_brief(interview_focus=[], gaps=[topic])
+    gap = next(q for q in build_questions(brief) if q["kind"] == "gap")
+    assert gap["question"].startswith(f"The posting lists {article} {topic}.")
+
+
+def test_skill_gap_keeps_the_old_wording():
+    brief = make_brief(interview_focus=["Linux (asked for, not on the resume)"], gaps=["Linux"])
+    gap = next(q for q in build_questions(brief) if q["kind"] == "gap")
+    assert gap["question"] == ("The posting asks for Linux, but I don't see it on your resume. What "
+                               "experience do you have with it, and how would you get up to speed quickly?")

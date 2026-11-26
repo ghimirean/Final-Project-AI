@@ -35,6 +35,9 @@ pip install -r requirements.txt
 cp .env.example .env        # then put your API keys in .env (never commit it)
 ```
 
+**Python version:** the pinned `requirements.txt` is tested on **Python 3.11** (GitHub Actions CI) and
+installs on Python 3.11 to 3.14.
+
 The empty template in `.env.example` lists three keys. Fill in the ones you
 need:
 
@@ -1006,6 +1009,12 @@ results = run_interview("output/interview_brief.json")    # the same dict that i
    you have about 1.0"), then the candidate's first project. If the brief has too little, generic
    questions (problem solving, teamwork, learning quickly) fill in.
 3. **Closing** ("Why should we hire you ...").
+
+**Degree gaps** (a topic with bachelor, master, PhD, doctorate, associate or "degree" in it, from
+`gaps` or `interview_focus`) get an education question instead of the skill wording, because a degree
+can't be picked up quickly: "The posting lists a Bachelor's degree. Tell me about your education and
+how it prepares you for this role." The question's `kind` is still `gap`, so `interview_results.json`
+doesn't change.
 
 ### Speech (`interview_speech.py`)
 Whisper transcribes the answer with word timestamps. A short prompt makes Whisper keep "um" and "uh"
