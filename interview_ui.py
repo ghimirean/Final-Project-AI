@@ -18,8 +18,9 @@ import streamlit as st
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(ROOT, "agents"))
-from interview_agent import OUTPUT_DIR, build_interview  # noqa: E402
+from interview_agent import MAX_ANSWER_SECONDS, OUTPUT_DIR, build_interview  # noqa: E402
 from interview_questions import BriefError  # noqa: E402
+from interview_recorder import AnswerRecorder, new_recordings_dir  # noqa: E402
 
 BRIEF_NAME = "interview_brief.json"
 
@@ -34,6 +35,13 @@ def output_dir():
 
 def brief_path():
     return os.path.join(output_dir(), BRIEF_NAME)
+
+
+def recordings_dir():
+    """This interview's folder: recordings/<date-time>/ like Agent 4's, under the
+    folder in INTERVAI_RECORDINGS_DIR if set (the tests use a temp folder)."""
+    base = os.environ.get("INTERVAI_RECORDINGS_DIR")
+    return new_recordings_dir(base) if base else new_recordings_dir()
 
 
 def load_interview(path=None):
@@ -63,6 +71,33 @@ def job_line(job):
     return f"{title} at {md(job['company'])}" if job.get("company") else title
 
 
+# One question goes through three phases: "ready" -> (Start answering)
+# "recording" -> (Stop) "stopped" -> (Next question / Finish) the next one.
+READY, RECORDING, STOPPED = "ready", "recording", "stopped"
+
+
+def button_states(phase):
+    """Which buttons can be clicked in a phase: {"start", "stop", "next"} -> enabled."""
+    return {"start": phase == READY, "stop": phase == RECORDING, "next": phase == STOPPED}
+
+
+def new_session(interview, folder=None):
+    """The st.session_state values for a freshly started interview."""
+    return {"interview": interview, "started": True, "index": 0, "phase": READY,
+            "recorder": None, "answers": [], "finished": False,
+            "recordings_dir": folder or recordings_dir()}
+
+
+def device_problems(errors):
+    """Agent 4's error strings ("speech: ...", "vision: ...") in words for the user."""
+    names = {"speech": "Microphone", "vision": "Webcam"}
+    out = []
+    for error in errors:
+        kind, _, text = str(error).partition(": ")
+        out.append(f"{names.get(kind, kind)}: {text}" if text else str(error))
+    return out
+
+
 # ---------- the page ----------
 
 def no_brief(error):
@@ -81,16 +116,74 @@ def start_page(interview):
     st.info("Your answers (microphone and webcam) are recorded and analysed on this computer "
             "only. Nothing is uploaded.")
     if st.button("Start the interview", type="primary"):
-        st.session_state["interview"] = interview
-        st.session_state["started"] = True
+        st.session_state.update(new_session(interview))
         st.rerun()
+
+
+def question_page():
+    """One question at a time: Start answering -> Stop -> Next question / Finish."""
+    s = st.session_state
+    questions = s["interview"]["questions"]
+    index, phase = s["index"], s["phase"]
+    question = questions[index]
+    last = index == len(questions) - 1
+
+    st.caption(f"Question {index + 1} of {len(questions)}")
+    st.subheader(md(question["question"], limit=1000))   # Agent 4's template + topics from the posting
+
+    recorder = s.get("recorder")
+    if phase == RECORDING:
+        if recorder is not None and recorder.recording:
+            st.warning(f"Recording (up to {MAX_ANSWER_SECONDS} s). Look at the camera and answer out "
+                       "loud, then click **Stop**.")
+        else:
+            st.warning("The recording has ended (time limit reached or no device could record). "
+                       "Click **Stop** to continue.")
+    elif phase == STOPPED:
+        got = s["answers"][index]
+        problems = device_problems(got["errors"])
+        if got["audio"] or got["video"]:
+            st.success("Answer recorded.")
+        else:
+            st.error("Nothing could be recorded for this question.")
+        for problem in problems:
+            st.caption(problem)
+
+    enabled = button_states(phase)
+    start_col, stop_col, next_col = st.columns(3)
+    if start_col.button("Start answering", type="primary", disabled=not enabled["start"]):
+        recorder = AnswerRecorder(question["id"], s["recordings_dir"])
+        recorder.start()
+        s["recorder"], s["phase"] = recorder, RECORDING
+        st.rerun()
+    if stop_col.button("Stop", disabled=not enabled["stop"]):
+        got = s["recorder"].stop()
+        s["answers"].append({"id": question["id"], **got})
+        s["recorder"], s["phase"] = None, STOPPED
+        st.rerun()
+    if next_col.button("Finish" if last else "Next question", disabled=not enabled["next"]):
+        if last:
+            s["finished"] = True
+        else:
+            s["index"], s["phase"] = index + 1, READY
+        st.rerun()
+
+
+def finished_page():
+    answers = st.session_state["answers"]
+    recorded = sum(1 for a in answers if a["audio"] or a["video"])
+    st.success(f"Interview finished: {recorded} of {len(answers)} answers recorded.")
+    st.caption("The answers are saved on this computer. Analysing them comes in a later step.")
 
 
 def main():
     st.set_page_config(page_title="INTERVAI - mock interview", layout="centered")
     st.title("INTERVAI: mock interview")
+    if st.session_state.get("finished"):
+        finished_page()
+        return
     if st.session_state.get("started"):
-        st.info("The interview has started.")
+        question_page()
         return
     try:
         interview = load_interview()
